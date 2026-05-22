@@ -33,19 +33,20 @@ from PySide6.QtWidgets import (
 )
 
 from .calendar_utils import is_holiday_or_weekend, month_dates, weekday_ko
-from .excel_io import export_schedule_to_excel, import_employees_from_excel, parse_employees_from_tsv, parse_unavailable
-from .models import ALL_SHIFTS, CORE_SHIFTS, OFF, Employee, ScheduleResult, ShiftRules
+from .excel_io import export_schedule_to_excel, import_employees_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_tsv, parse_unavailable
+from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
 from .validation import validate_schedule
 
-SHIFT_OPTIONS = ["", "Day", "SW", "GY", "토당", "휴무"]
+SHIFT_OPTIONS = ["", SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY, SHIFT_GY_REST]
 SHIFT_COLORS = {
-    "Day": QColor("#fff2cc"),
-    "SW": QColor("#d9ead3"),
-    "GY": QColor("#d9e2f3"),
-    "토당": QColor("#fce4d6"),
-    "휴무": QColor("#ffffff"),
+    SHIFT_DAY: QColor("#fff2cc"),
+    SHIFT_SWING: QColor("#d9ead3"),
+    SHIFT_GY: QColor("#d9e2f3"),
+    SHIFT_DUTY: QColor("#fce4d6"),
+    SHIFT_GY_REST: QColor("#e7e6e6"),
+    OFF: QColor("#ffffff"),
     "": QColor("#ffffff"),
 }
 WARNING_COLOR = QColor("#f4cccc")
@@ -113,7 +114,7 @@ class MainWindow(QMainWindow):
         self.employee_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         self.paste_box = QTextEdit()
-        self.paste_box.setPlaceholderText("엑셀에서 성명\t사번\t신규(Y/N)\t불가일 형태로 붙여넣기")
+        self.paste_box.setPlaceholderText("기존 월 근무표 전체를 붙여넣으세요. 예: 성명\t사번\t1\t2\t3... / 값: S, D, 당직, 지휴, G/지근")
         self.paste_box.setMaximumHeight(100)
 
         self.schedule_table = PasteTableWidget(0, 0, allow_expand=False)
@@ -140,15 +141,12 @@ class MainWindow(QMainWindow):
             widget.setValue(value)
             return widget
 
-        self.weekday_day_spin = spin(self.rules.min_weekday.get("Day", 1))
-        self.weekday_sw_spin = spin(self.rules.min_weekday.get("SW", 1))
-        self.weekday_gy_spin = spin(self.rules.min_weekday.get("GY", 1))
-        self.holiday_day_spin = spin(self.rules.min_holiday.get("Day", 1))
-        self.holiday_sw_spin = spin(self.rules.min_holiday.get("SW", 1))
-        self.holiday_gy_spin = spin(self.rules.min_holiday.get("GY", 1))
-        self.saturday_duty_check = QCheckBox("토요일 토당 자동 배정")
-        self.saturday_duty_check.setChecked(self.rules.saturday_duty_min > 0)
-        self.saturday_duty_spin = spin(self.rules.saturday_duty_min)
+        self.weekday_day_spin = spin(self.rules.min_weekday.get(SHIFT_DAY, 1))
+        self.weekday_sw_spin = spin(self.rules.min_weekday.get(SHIFT_SWING, 1))
+        self.weekday_gy_spin = spin(self.rules.min_weekday.get(SHIFT_GY, 1))
+        self.holiday_day_spin = spin(self.rules.min_holiday.get(SHIFT_DAY, 1))
+        self.holiday_sw_spin = spin(self.rules.min_holiday.get(SHIFT_SWING, 1))
+        self.holiday_gy_spin = spin(self.rules.min_holiday.get(SHIFT_DUTY, 1))
         self.max_consecutive_spin = spin(self.rules.max_consecutive_work_days, 1)
         self.max_consecutive_gy_spin = spin(self.rules.max_consecutive_gy, 1)
 
@@ -176,7 +174,7 @@ class MainWindow(QMainWindow):
         validate_btn.clicked.connect(self.refresh_validation_and_stats)
         add_btn = QPushButton("직원 행 추가")
         add_btn.clicked.connect(lambda: self.employee_table.insertRow(self.employee_table.rowCount()))
-        paste_btn = QPushButton("붙여넣기 반영")
+        paste_btn = QPushButton("기존 근무표 붙여넣기 반영")
         paste_btn.clicked.connect(self.apply_pasted_employees)
         top.addWidget(generate_btn)
         top.addWidget(validate_btn)
@@ -190,14 +188,14 @@ class MainWindow(QMainWindow):
 
         employee_tab = QWidget()
         employee_layout = QVBoxLayout(employee_tab)
-        employee_layout.addWidget(QLabel("직원 목록: 성명/사번/신규/불가일을 입력하세요. 엑셀에서 복사 후 아래 박스에 붙여넣을 수 있습니다."))
+        employee_layout.addWidget(QLabel("기존 엑셀 근무표를 아래 박스에 통째로 붙여넣고 반영하세요. 형식: 성명/사번/1일~말일, 값: S, D, 당직, 지휴, G/지근"))
         employee_layout.addWidget(self.employee_table)
         employee_layout.addWidget(self.paste_box)
         tabs.addTab(employee_tab, "직원 관리")
 
         schedule_tab = QWidget()
         schedule_layout = QVBoxLayout(schedule_tab)
-        schedule_layout.addWidget(QLabel("근무표: 셀을 직접 수정할 수 있습니다. 수정 후 자동 검증 결과가 아래에 표시됩니다."))
+        schedule_layout.addWidget(QLabel("근무표: 셀을 직접 수정할 수 있습니다. 사용 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
         schedule_layout.addWidget(self.schedule_table)
         tabs.addTab(schedule_tab, "월간 근무표")
 
@@ -210,20 +208,18 @@ class MainWindow(QMainWindow):
         settings_layout = QHBoxLayout(settings_tab)
         weekday_group = QGroupBox("평일 최소 인원")
         weekday_form = QFormLayout(weekday_group)
-        weekday_form.addRow("Day", self.weekday_day_spin)
-        weekday_form.addRow("SW", self.weekday_sw_spin)
-        weekday_form.addRow("GY", self.weekday_gy_spin)
+        weekday_form.addRow("D", self.weekday_day_spin)
+        weekday_form.addRow("S", self.weekday_sw_spin)
+        weekday_form.addRow("G/지근", self.weekday_gy_spin)
 
         holiday_group = QGroupBox("휴일/주말 최소 인원")
         holiday_form = QFormLayout(holiday_group)
-        holiday_form.addRow("Day", self.holiday_day_spin)
-        holiday_form.addRow("SW", self.holiday_sw_spin)
-        holiday_form.addRow("GY", self.holiday_gy_spin)
+        holiday_form.addRow("D", self.holiday_day_spin)
+        holiday_form.addRow("S", self.holiday_sw_spin)
+        holiday_form.addRow("당직", self.holiday_gy_spin)
 
         rule_group = QGroupBox("제약")
         rule_form = QFormLayout(rule_group)
-        rule_form.addRow(self.saturday_duty_check)
-        rule_form.addRow("토당 최소 인원", self.saturday_duty_spin)
         rule_form.addRow("최대 연속 근무", self.max_consecutive_spin)
         rule_form.addRow("최대 연속 GY", self.max_consecutive_gy_spin)
 
@@ -252,16 +248,15 @@ class MainWindow(QMainWindow):
 
     def sync_rules_from_widgets(self) -> None:
         self.rules.min_weekday = {
-            "Day": self.weekday_day_spin.value(),
-            "SW": self.weekday_sw_spin.value(),
-            "GY": self.weekday_gy_spin.value(),
+            SHIFT_DAY: self.weekday_day_spin.value(),
+            SHIFT_SWING: self.weekday_sw_spin.value(),
+            SHIFT_GY: self.weekday_gy_spin.value(),
         }
         self.rules.min_holiday = {
-            "Day": self.holiday_day_spin.value(),
-            "SW": self.holiday_sw_spin.value(),
-            "GY": self.holiday_gy_spin.value(),
+            SHIFT_DAY: self.holiday_day_spin.value(),
+            SHIFT_SWING: self.holiday_sw_spin.value(),
+            SHIFT_DUTY: self.holiday_gy_spin.value(),
         }
-        self.rules.saturday_duty_min = self.saturday_duty_spin.value() if self.saturday_duty_check.isChecked() else 0
         self.rules.max_consecutive_work_days = self.max_consecutive_spin.value()
         self.rules.max_consecutive_gy = self.max_consecutive_gy_spin.value()
 
@@ -292,11 +287,26 @@ class MainWindow(QMainWindow):
         return item.text().strip() if item else ""
 
     def apply_pasted_employees(self) -> None:
-        employees = parse_employees_from_tsv(self.paste_box.toPlainText())
-        if not employees:
-            QMessageBox.warning(self, "붙여넣기 실패", "붙여넣은 직원 데이터를 읽지 못했습니다.")
+        text = self.paste_box.toPlainText()
+        if not text.strip():
+            QMessageBox.warning(self, "붙여넣기 실패", "붙여넣은 표가 비어 있습니다.")
             return
-        self.add_employee_rows(employees)
+        self.sync_rules_from_widgets()
+        try:
+            self.result = parse_schedule_from_tsv(text, self.year_spin.value(), self.month_spin.value(), self.rules)
+        except Exception as exc:
+            # Fallback: old employee-list-only paste format.
+            employees = parse_employees_from_tsv(text)
+            if not employees:
+                QMessageBox.warning(self, "붙여넣기 실패", f"근무표를 읽지 못했습니다.\n{exc}")
+                return
+            self.add_employee_rows(employees)
+            self.paste_box.clear()
+            return
+        self.employees = self.result.employees
+        self.add_employee_rows(self.employees)
+        self.render_schedule_table()
+        self.refresh_validation_and_stats()
         self.paste_box.clear()
 
     def import_excel(self) -> None:
@@ -338,7 +348,7 @@ class MainWindow(QMainWindow):
         self.sync_rules_from_widgets()
         self.employees = self.collect_employees()
         if len(self.employees) < 3:
-            QMessageBox.warning(self, "생성 불가", "Day/SW/GY 최소 인원을 채우려면 직원이 최소 3명 필요합니다.")
+            QMessageBox.warning(self, "생성 불가", "D/S/G 최소 인원을 채우려면 직원이 최소 3명 필요합니다.")
             return
         try:
             self.result = generate_month_schedule(
@@ -401,27 +411,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def normalize_shift(text: str) -> str:
-        if not text:
-            return OFF
-        t = text.strip().lower()
-        mapping = {
-            "d": "Day",
-            "day": "Day",
-            "데이": "Day",
-            "s": "SW",
-            "sw": "SW",
-            "swing": "SW",
-            "스윙": "SW",
-            "g": "GY",
-            "gy": "GY",
-            "graveyard": "GY",
-            "야간": "GY",
-            "토당": "토당",
-            "off": OFF,
-            "휴무": OFF,
-            "x": OFF,
-        }
-        return mapping.get(t, text)
+        return normalize_shift_code(text)
 
     def sync_schedule_from_table(self) -> None:
         if not self.result:
@@ -492,7 +482,7 @@ class MainWindow(QMainWindow):
                     continue
                 shift = self.normalize_shift(item.text())
                 item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
-                if shift != OFF and d in emp.unavailable_dates:
+                if shift not in (OFF, SHIFT_GY_REST) and d in emp.unavailable_dates:
                     item.setBackground(WARNING_COLOR)
 
 

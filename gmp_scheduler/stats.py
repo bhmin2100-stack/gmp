@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from typing import Dict, Iterable, List, Set
 
 from .calendar_utils import is_holiday_or_weekend
-from .models import CORE_SHIFTS, OFF, SHIFT_DAY, SHIFT_GY, SHIFT_SAT_DUTY, SHIFT_SWING, Employee, ScheduleMap
+from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap
 
 
 @dataclass
@@ -23,8 +22,9 @@ class EmployeeStats:
     holiday_day: int = 0
     holiday_swing: int = 0
     holiday_gy: int = 0
+    duty: int = 0
+    gy_rest: int = 0
     weekend_work: int = 0
-    saturday_duty: int = 0
     off: int = 0
     total_work: int = 0
     max_consecutive_work: int = 0
@@ -43,8 +43,8 @@ class EmployeeStats:
             self.holiday_day,
             self.holiday_swing,
             self.holiday_gy,
-            self.weekend_work,
-            self.saturday_duty,
+            self.duty,
+            self.gy_rest,
             self.off,
             self.total_work,
             self.max_consecutive_work,
@@ -55,22 +55,30 @@ class EmployeeStats:
 STAT_HEADERS = [
     "성명",
     "사번",
-    "Day",
-    "SW",
+    "D",
+    "S",
     "GY",
-    "평일 Day",
-    "평일 SW",
-    "평일 GY",
-    "휴일 Day",
-    "휴일 SW",
+    "평일 D",
+    "평일 S",
+    "평일 G/지근",
+    "휴일 D",
+    "휴일 S",
     "휴일 GY",
-    "휴일근무",
-    "토당",
-    "휴무",
+    "당직",
+    "지휴",
+    "빈칸/휴무",
     "총근무",
     "최대연속근무",
     "최대연속GY",
 ]
+
+
+def is_work_shift(shift: str) -> bool:
+    return shift in (SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY)
+
+
+def is_gy_shift(shift: str) -> bool:
+    return shift in (SHIFT_GY, SHIFT_DUTY)
 
 
 def compute_stats(employees: List[Employee], dates: Iterable[date], schedule: ScheduleMap, holidays: Set[date]) -> Dict[str, EmployeeStats]:
@@ -84,8 +92,11 @@ def compute_stats(employees: List[Employee], dates: Iterable[date], schedule: Sc
         consecutive_gy = 0
         for d in date_list:
             shift = schedule.get(d, {}).get(e.key, OFF)
-            if not shift or shift == OFF:
-                stats[e.key].off += 1
+            if not shift or shift == OFF or shift == SHIFT_GY_REST:
+                if shift == SHIFT_GY_REST:
+                    stats[e.key].gy_rest += 1
+                else:
+                    stats[e.key].off += 1
                 consecutive_work = 0
                 consecutive_gy = 0
                 continue
@@ -107,18 +118,19 @@ def compute_stats(employees: List[Employee], dates: Iterable[date], schedule: Sc
                     stats[e.key].holiday_swing += 1
                 else:
                     stats[e.key].weekday_swing += 1
-            elif shift == SHIFT_GY:
+            elif shift in (SHIFT_GY, SHIFT_DUTY):
                 stats[e.key].gy += 1
                 consecutive_gy += 1
                 stats[e.key].max_consecutive_gy = max(stats[e.key].max_consecutive_gy, consecutive_gy)
-                if is_holiday:
+                if shift == SHIFT_DUTY:
+                    stats[e.key].duty += 1
+                    stats[e.key].holiday_gy += 1
+                elif is_holiday:
                     stats[e.key].holiday_gy += 1
                 else:
                     stats[e.key].weekday_gy += 1
-            elif shift == SHIFT_SAT_DUTY:
-                stats[e.key].saturday_duty += 1
 
-            if shift != SHIFT_GY:
+            if shift not in (SHIFT_GY, SHIFT_DUTY):
                 consecutive_gy = 0
             if is_holiday:
                 stats[e.key].weekend_work += 1
@@ -139,7 +151,8 @@ def averages(stats: Dict[str, EmployeeStats]) -> Dict[str, float]:
         "holiday_swing",
         "holiday_gy",
         "weekend_work",
-        "saturday_duty",
+        "duty",
+        "gy_rest",
         "off",
         "total_work",
     ]

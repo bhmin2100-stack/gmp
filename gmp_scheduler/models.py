@@ -5,14 +5,16 @@ from datetime import date
 from typing import Dict, List, Set
 
 
-SHIFT_DAY = "Day"
-SHIFT_SWING = "SW"
-SHIFT_GY = "GY"
-SHIFT_SAT_DUTY = "토당"
-OFF = "휴무"
+SHIFT_DAY = "D"
+SHIFT_SWING = "S"
+SHIFT_GY = "G/지근"
+SHIFT_DUTY = "당직"
+SHIFT_GY_REST = "지휴"
+OFF = ""
 
-CORE_SHIFTS = (SHIFT_DAY, SHIFT_SWING, SHIFT_GY)
-ALL_SHIFTS = (SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_SAT_DUTY)
+WORK_SHIFTS = (SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY)
+REST_SHIFTS = (SHIFT_GY_REST,)
+ALL_SHIFTS = (SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY, SHIFT_GY_REST)
 
 
 @dataclass(frozen=True)
@@ -37,9 +39,8 @@ class ShiftRules:
     min_holiday: Dict[str, int] = field(default_factory=lambda: {
         SHIFT_DAY: 1,
         SHIFT_SWING: 1,
-        SHIFT_GY: 1,
+        SHIFT_DUTY: 1,
     })
-    saturday_duty_min: int = 1
     max_consecutive_work_days: int = 5
     max_consecutive_gy: int = 2
     allow_same_day_multiple_shift: bool = False

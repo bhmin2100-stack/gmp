@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
-from .calendar_utils import is_holiday_or_weekend, month_dates, weekday_ko
-from .models import OFF, SHIFT_DAY, SHIFT_GY, SHIFT_SAT_DUTY, SHIFT_SWING, Employee, ScheduleResult
+from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
+from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult
 from .stats import STAT_HEADERS, averages, compute_stats
+from .validation import validate_schedule
+from .models import ShiftRules
 
 SHIFT_FILLS = {
     SHIFT_DAY: "FFF2CC",
     SHIFT_SWING: "D9EAD3",
     SHIFT_GY: "D9E2F3",
-    SHIFT_SAT_DUTY: "FCE4D6",
+    SHIFT_DUTY: "FCE4D6",
+    SHIFT_GY_REST: "E7E6E6",
     OFF: "FFFFFF",
     "": "FFFFFF",
 }
@@ -48,6 +52,103 @@ def parse_unavailable(text: object, default_year: Optional[int] = None, default_
         d = parse_date(part.strip(), default_year, default_month)
         if d:
             result.add(d)
+    return result
+
+
+def normalize_shift_code(value: object, work_date: Optional[date] = None, holidays: Optional[Set[date]] = None) -> str:
+    text = "" if value is None else str(value).strip()
+    text = text.replace(" ", "")
+    if not text:
+        return OFF
+    upper = text.upper()
+    if upper in ("D", "DAY", "데이"):
+        return SHIFT_DAY
+    if upper in ("S", "SW", "SWING", "스윙"):
+        return SHIFT_SWING
+    if upper in ("G/지근", "G", "GY") or text in ("G/지근", "G/地勤", "지근", "야간"):
+        if work_date and holidays and is_holiday_or_weekend(work_date, holidays):
+            return SHIFT_DUTY
+        return SHIFT_GY
+    if text in ("당직", "주말당직"):
+        return SHIFT_DUTY
+    if text in ("지휴", "GY휴", "G휴", "야휴"):
+        return SHIFT_GY_REST
+    if text in ("휴", "휴무", "OFF", "오프", "-", "."):
+        return OFF
+    return text
+
+
+def _header_day(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (date, datetime)):
+        return value.day
+    text = str(value).strip()
+    if not text:
+        return None
+    match = re.search(r"\d{1,2}", text)
+    if not match:
+        return None
+    day = int(match.group())
+    if 1 <= day <= 31:
+        return day
+    return None
+
+
+def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[ShiftRules] = None) -> ScheduleResult:
+    rows = [[cell.strip() for cell in line.split("\t")] for line in text.splitlines() if line.strip()]
+    if not rows:
+        raise ValueError("붙여넣은 표가 비어 있습니다.")
+
+    header_index = 0
+    name_col = 0
+    id_col = 1
+    day_cols: Dict[int, int] = {}
+
+    for idx, row in enumerate(rows[:5]):
+        lowered = [c.replace(" ", "").lower() for c in row]
+        if any(c in ("성명", "이름", "name") for c in lowered):
+            header_index = idx
+            for col, cell in enumerate(lowered):
+                if cell in ("성명", "이름", "name"):
+                    name_col = col
+                if cell in ("사번", "직번", "id", "employeeid", "employee_id"):
+                    id_col = col
+            break
+
+    header = rows[header_index]
+    valid_dates = {d.day: d for d in month_dates(year, month)}
+    for col, cell in enumerate(header):
+        day = _header_day(cell)
+        if day in valid_dates:
+            day_cols[day] = col
+
+    if not day_cols:
+        # Header might be omitted; assume columns after 성명/사번 are 1..말일.
+        for offset, d in enumerate(month_dates(year, month), start=2):
+            day_cols[d.day] = offset
+
+    holidays = korean_holidays(year)
+    employees: List[Employee] = []
+    schedule: ScheduleMap = {d: {} for d in month_dates(year, month)}
+
+    for row in rows[header_index + 1:]:
+        if name_col >= len(row) or not row[name_col].strip():
+            continue
+        name = row[name_col].strip()
+        employee_id = row[id_col].strip() if id_col < len(row) else ""
+        emp = Employee(name=name, employee_id=employee_id)
+        employees.append(emp)
+        for d in month_dates(year, month):
+            col = day_cols.get(d.day)
+            raw = row[col] if col is not None and col < len(row) else ""
+            schedule[d][emp.key] = normalize_shift_code(raw, d, holidays)
+
+    if not employees:
+        raise ValueError("표에서 직원 행을 찾지 못했습니다.")
+
+    result = ScheduleResult(year=year, month=month, employees=employees, schedule=schedule, holidays=holidays)
+    result.warnings = validate_schedule(employees, year, month, schedule, holidays, rules or ShiftRules())
     return result
 
 
@@ -137,15 +238,13 @@ def export_schedule_to_excel(result: ScheduleResult, path: str | Path) -> None:
         c.alignment = Alignment(horizontal="center")
         if is_holiday_or_weekend(d, result.holidays):
             c.fill = PatternFill("solid", fgColor="F4CCCC")
-    ws.cell(row=2, column=1, value="")
-    ws.cell(row=2, column=2, value="")
 
     for row_idx, emp in enumerate(result.employees, start=3):
         ws.cell(row=row_idx, column=1, value=emp.name)
         ws.cell(row=row_idx, column=2, value=emp.employee_id)
         for col_idx, d in enumerate(dates, start=3):
             shift = result.schedule.get(d, {}).get(emp.key, OFF)
-            cell = ws.cell(row=row_idx, column=col_idx, value="" if shift == OFF else shift)
+            cell = ws.cell(row=row_idx, column=col_idx, value=shift)
             cell.alignment = Alignment(horizontal="center")
             cell.fill = PatternFill("solid", fgColor=SHIFT_FILLS.get(shift, "FFFFFF"))
             cell.border = border

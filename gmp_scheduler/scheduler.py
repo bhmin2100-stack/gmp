@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates
-from .models import CORE_SHIFTS, OFF, SHIFT_GY, SHIFT_SAT_DUTY, Employee, ScheduleMap, ScheduleResult, ShiftRules
+from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .validation import validate_schedule
 
 
@@ -32,6 +32,8 @@ def generate_month_schedule(
 
     def bucket(d: date, shift: str) -> str:
         prefix = "holiday" if is_holiday_or_weekend(d, holidays) else "weekday"
+        if shift == SHIFT_DUTY:
+            return "holiday_GY"
         return f"{prefix}_{shift}"
 
     def prev_shift(emp: Employee, d: date) -> str:
@@ -40,7 +42,7 @@ def generate_month_schedule(
     def consecutive_work_before(emp: Employee, d: date) -> int:
         n = 0
         cur = d - timedelta(days=1)
-        while cur in schedule and schedule[cur].get(emp.key, OFF) != OFF:
+        while cur in schedule and schedule[cur].get(emp.key, OFF) not in (OFF, SHIFT_GY_REST):
             n += 1
             cur -= timedelta(days=1)
         return n
@@ -48,7 +50,7 @@ def generate_month_schedule(
     def consecutive_gy_before(emp: Employee, d: date) -> int:
         n = 0
         cur = d - timedelta(days=1)
-        while cur in schedule and schedule[cur].get(emp.key, OFF) == SHIFT_GY:
+        while cur in schedule and schedule[cur].get(emp.key, OFF) in (SHIFT_GY, SHIFT_DUTY):
             n += 1
             cur -= timedelta(days=1)
         return n
@@ -57,13 +59,13 @@ def generate_month_schedule(
         if not emp.is_new:
             return 0
         b = bucket(d, shift)
-        if b in ("weekday_Day", "weekday_SW"):
-            if counts[emp.key]["weekday_Day"] + counts[emp.key]["weekday_SW"] == 0:
+        if b in ("weekday_D", "weekday_S"):
+            if counts[emp.key]["weekday_D"] + counts[emp.key]["weekday_S"] == 0:
                 return -12
-        if b in ("holiday_Day", "holiday_SW"):
-            if counts[emp.key]["holiday_Day"] + counts[emp.key]["holiday_SW"] == 0:
+        if b in ("holiday_D", "holiday_S"):
+            if counts[emp.key]["holiday_D"] + counts[emp.key]["holiday_S"] == 0:
                 return -12
-        if b == "weekday_GY" and counts[emp.key][b] == 0:
+        if b == "weekday_G/지근" and counts[emp.key][b] == 0:
             return -14
         return 0
 
@@ -80,19 +82,24 @@ def generate_month_schedule(
             score += 1000
         else:
             score += cw * 5
-        if shift == SHIFT_GY:
+        if shift in (SHIFT_GY, SHIFT_DUTY):
             if cgy >= rules.max_consecutive_gy:
                 score += 1000
             else:
                 score += cgy * 40
-        elif prev_shift(emp, d) == SHIFT_GY:
-            score += 12
+        elif prev_shift(emp, d) in (SHIFT_GY, SHIFT_DUTY):
+            score += 30
 
         if d in emp.unavailable_dates:
             score += 100000
         score += training_bonus(emp, d, shift)
         score += rng.random()
         return score, rng.random()
+
+    def reserve_gy_rest(emp: Employee, d: date) -> None:
+        next_day = d + timedelta(days=1)
+        if next_day in schedule and schedule[next_day].get(emp.key, OFF) == OFF:
+            schedule[next_day][emp.key] = SHIFT_GY_REST
 
     def assign_one(d: date, shift: str) -> bool:
         candidates = [
@@ -109,18 +116,17 @@ def generate_month_schedule(
         counts[chosen.key]["total"] += 1
         if is_holiday_or_weekend(d, holidays):
             counts[chosen.key]["holiday_work"] += 1
+        if shift in (SHIFT_GY, SHIFT_DUTY):
+            reserve_gy_rest(chosen, d)
         return True
 
     for d in dates:
         min_rules = rules.min_holiday if is_holiday_or_weekend(d, holidays) else rules.min_weekday
-        shift_order = list(CORE_SHIFTS)
+        shift_order = list(min_rules.keys())
         rng.shuffle(shift_order)
         for shift in shift_order:
             for _ in range(min_rules.get(shift, 0)):
                 assign_one(d, shift)
-        if d.weekday() == 5:
-            for _ in range(rules.saturday_duty_min):
-                assign_one(d, SHIFT_SAT_DUTY)
 
     result = ScheduleResult(year=year, month=month, employees=employees, schedule=schedule, holidays=holidays)
     result.warnings = validate_schedule(employees, year, month, schedule, holidays, rules)
