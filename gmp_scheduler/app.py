@@ -33,7 +33,8 @@ from PySide6.QtWidgets import (
 )
 
 from .calendar_utils import is_holiday_or_weekend, month_dates, weekday_ko
-from .excel_io import export_schedule_to_excel, import_employees_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_tsv, parse_unavailable
+from .database import cumulative_stats, save_schedule, save_unavailable_days, saved_months
+from .excel_io import export_schedule_to_excel, import_employees_from_excel, import_unavailable_from_gray_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_tsv, parse_unavailable
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
@@ -120,7 +121,9 @@ class MainWindow(QMainWindow):
         self.schedule_table = PasteTableWidget(0, 0, allow_expand=False)
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
 
-        self.stats_table = QTableWidget()
+        self.month_stats_table = QTableWidget()
+        self.cumulative_stats_table = QTableWidget()
+        self.saved_months_table = QTableWidget()
         self.warning_box = QTextEdit()
         self.warning_box.setReadOnly(True)
 
@@ -153,11 +156,17 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         toolbar = QToolBar("main")
         self.addToolBar(toolbar)
-        import_action = QAction("엑셀 불러오기", self)
+        import_action = QAction("직원 엑셀 불러오기", self)
         import_action.triggered.connect(self.import_excel)
+        unavailable_action = QAction("회색 불가일 엑셀", self)
+        unavailable_action.triggered.connect(self.import_unavailable_excel)
+        save_db_action = QAction("현재 근무표 DB 저장", self)
+        save_db_action.triggered.connect(self.save_current_schedule_to_db)
         export_action = QAction("엑셀 저장", self)
         export_action.triggered.connect(self.export_excel)
         toolbar.addAction(import_action)
+        toolbar.addAction(unavailable_action)
+        toolbar.addAction(save_db_action)
         toolbar.addAction(export_action)
 
         root = QWidget()
@@ -201,7 +210,15 @@ class MainWindow(QMainWindow):
 
         stats_tab = QWidget()
         stats_layout = QVBoxLayout(stats_tab)
-        stats_layout.addWidget(self.stats_table)
+        stats_layout.addWidget(QLabel("월간 통계"))
+        stats_layout.addWidget(self.month_stats_table)
+        refresh_cum_btn = QPushButton("누적 통계 새로고침")
+        refresh_cum_btn.clicked.connect(self.render_cumulative_stats)
+        stats_layout.addWidget(refresh_cum_btn)
+        stats_layout.addWidget(QLabel("DB 저장 월 목록"))
+        stats_layout.addWidget(self.saved_months_table)
+        stats_layout.addWidget(QLabel("누적 통계"))
+        stats_layout.addWidget(self.cumulative_stats_table)
         tabs.addTab(stats_tab, "통계")
 
         settings_tab = QWidget()
@@ -308,6 +325,54 @@ class MainWindow(QMainWindow):
         self.render_schedule_table()
         self.refresh_validation_and_stats()
         self.paste_box.clear()
+
+    def import_unavailable_excel(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "회색 불가일 엑셀 불러오기", "", "Excel Files (*.xlsx *.xlsm)")
+        if not path:
+            return
+        self.employees = self.collect_employees()
+        if not self.employees and self.result:
+            self.employees = self.result.employees
+        if not self.employees:
+            QMessageBox.warning(self, "불러오기 실패", "먼저 기존 근무표를 붙여넣거나 직원 목록을 입력하세요.")
+            return
+        try:
+            unavailable_map = import_unavailable_from_gray_excel(path, self.year_spin.value(), self.month_spin.value())
+        except Exception as exc:
+            QMessageBox.critical(self, "불러오기 실패", str(exc))
+            return
+        hit = 0
+        updated = []
+        for emp in self.employees:
+            dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
+            if dates:
+                hit += len(dates)
+                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates)))
+            else:
+                updated.append(emp)
+        self.employees = updated
+        self.add_employee_rows(self.employees)
+        if self.result:
+            self.result.employees = self.employees
+            save_unavailable_days(self.employees, Path(path).name)
+            self.refresh_validation_and_stats()
+        QMessageBox.information(self, "불가일 반영", f"회색 셀 불가일 {hit}건을 반영했습니다.")
+
+    def save_current_schedule_to_db(self) -> None:
+        if not self.result:
+            QMessageBox.warning(self, "DB 저장 불가", "먼저 기존 근무표를 붙여넣거나 자동 생성하세요.")
+            return
+        self.sync_schedule_from_table()
+        self.refresh_validation_and_stats()
+        source_name = f"{self.result.year}-{self.result.month:02d}"
+        try:
+            schedule_id = save_schedule(self.result, source_name)
+            save_unavailable_days(self.result.employees, source_name)
+        except Exception as exc:
+            QMessageBox.critical(self, "DB 저장 실패", str(exc))
+            return
+        self.render_cumulative_stats()
+        QMessageBox.information(self, "DB 저장 완료", f"근무표를 DB에 저장했습니다. ID: {schedule_id}")
 
     def import_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "직원 엑셀 불러오기", "", "Excel Files (*.xlsx *.xlsm)")
@@ -446,10 +511,10 @@ class MainWindow(QMainWindow):
         stats = compute_stats(self.result.employees, dates, self.result.schedule, self.result.holidays)
         avg = averages(stats)
         headers = STAT_HEADERS + ["총근무 평균편차"]
-        self.stats_table.clear()
-        self.stats_table.setColumnCount(len(headers))
-        self.stats_table.setRowCount(len(stats))
-        self.stats_table.setHorizontalHeaderLabels(headers)
+        self.month_stats_table.clear()
+        self.month_stats_table.setColumnCount(len(headers))
+        self.month_stats_table.setRowCount(len(stats))
+        self.month_stats_table.setHorizontalHeaderLabels(headers)
         for row, stat in enumerate(stats.values()):
             values = stat.as_row() + [round(stat.total_work - avg.get("total_work", 0), 2)]
             for col, value in enumerate(values):
@@ -457,9 +522,34 @@ class MainWindow(QMainWindow):
                 item.setTextAlignment(Qt.AlignCenter)
                 if col == len(headers) - 1 and isinstance(value, (int, float)) and abs(value) >= 2:
                     item.setBackground(WARNING_COLOR)
-                self.stats_table.setItem(row, col, item)
-        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.stats_table.verticalHeader().setVisible(False)
+                self.month_stats_table.setItem(row, col, item)
+        self.month_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.month_stats_table.verticalHeader().setVisible(False)
+
+    def render_cumulative_stats(self) -> None:
+        month_rows = saved_months()
+        self.saved_months_table.clear()
+        self.saved_months_table.setColumnCount(5)
+        self.saved_months_table.setHorizontalHeaderLabels(["ID", "연도", "월", "출처", "저장시각"])
+        self.saved_months_table.setRowCount(len(month_rows))
+        for r, row in enumerate(month_rows):
+            for c, key in enumerate(["id", "year", "month", "source_name", "imported_at"]):
+                self.saved_months_table.setItem(r, c, QTableWidgetItem(str(row.get(key, ""))))
+        self.saved_months_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.saved_months_table.verticalHeader().setVisible(False)
+
+        rows = cumulative_stats()
+        headers = ["성명", "사번", "D", "S", "G/지근", "당직", "지휴", "총근무"]
+        keys = ["name", "employee_no", "d_count", "s_count", "weekday_gy_count", "duty_count", "gy_rest_count", "total_work"]
+        self.cumulative_stats_table.clear()
+        self.cumulative_stats_table.setColumnCount(len(headers))
+        self.cumulative_stats_table.setHorizontalHeaderLabels(headers)
+        self.cumulative_stats_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, key in enumerate(keys):
+                self.cumulative_stats_table.setItem(r, c, QTableWidgetItem(str(row.get(key) or 0)))
+        self.cumulative_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.cumulative_stats_table.verticalHeader().setVisible(False)
 
     def render_warnings(self) -> None:
         if not self.result:

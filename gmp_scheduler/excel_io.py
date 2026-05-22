@@ -152,6 +152,110 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
     return result
 
 
+
+def _rgb_from_openpyxl_color(color) -> Optional[tuple[int, int, int]]:
+    if color is None:
+        return None
+    rgb = getattr(color, "rgb", None)
+    if rgb and isinstance(rgb, str):
+        rgb = rgb[-6:]
+        try:
+            return int(rgb[0:2], 16), int(rgb[2:4], 16), int(rgb[4:6], 16)
+        except ValueError:
+            return None
+    indexed = getattr(color, "indexed", None)
+    indexed_map = {
+        22: (192, 192, 192),
+        23: (128, 128, 128),
+        48: (128, 128, 128),
+        15: (192, 192, 192),
+        16: (128, 128, 128),
+    }
+    if indexed in indexed_map:
+        return indexed_map[indexed]
+    return None
+
+
+def is_gray_fill(cell) -> bool:
+    fill = getattr(cell, "fill", None)
+    if fill is None or not getattr(fill, "fill_type", None):
+        return False
+    rgb = _rgb_from_openpyxl_color(getattr(fill, "fgColor", None)) or _rgb_from_openpyxl_color(getattr(fill, "start_color", None))
+    if rgb is None:
+        # Theme colors are hard to resolve without workbook theme parsing. If a schedule cell
+        # has any non-empty fill but no RGB, treat it as marked unavailable.
+        fg = getattr(fill, "fgColor", None)
+        if fg and getattr(fg, "type", None) == "theme":
+            return True
+        return False
+    r, g, b = rgb
+    if (r, g, b) in ((255, 255, 255), (0, 0, 0)):
+        return False
+    return max(r, g, b) - min(r, g, b) <= 18 and 70 <= (r + g + b) / 3 <= 235
+
+
+def import_unavailable_from_gray_excel(path: str | Path, year: int, month: int) -> Dict[str, Set[date]]:
+    """Read an Excel roster and return unavailable dates from gray-filled date cells.
+
+    Expected sheet shape: 성명 | 사번 | 1 | 2 | ... | 말일.
+    Keys are both employee key `name|employee_no` and employee_no/name fallbacks.
+    """
+    try:
+        from openpyxl import load_workbook  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("openpyxl이 필요합니다. `pip install -r requirements.txt`를 실행하세요.") from exc
+
+    wb = load_workbook(path, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows())
+    if not rows:
+        return {}
+
+    header_row_idx = 0
+    name_col = 0
+    id_col = 1
+    for idx, row in enumerate(rows[:8]):
+        values = [str(c.value).strip().replace(" ", "").lower() if c.value is not None else "" for c in row]
+        if any(v in ("성명", "이름", "name") for v in values):
+            header_row_idx = idx
+            for col, v in enumerate(values):
+                if v in ("성명", "이름", "name"):
+                    name_col = col
+                if v in ("사번", "직번", "id", "employeeid", "employee_id"):
+                    id_col = col
+            break
+
+    valid_dates = {d.day: d for d in month_dates(year, month)}
+    day_cols: Dict[int, int] = {}
+    for col, cell in enumerate(rows[header_row_idx]):
+        day = _header_day(cell.value)
+        if day in valid_dates:
+            day_cols[day] = col
+
+    if not day_cols:
+        for offset, d in enumerate(month_dates(year, month), start=2):
+            day_cols[d.day] = offset
+
+    result: Dict[str, Set[date]] = {}
+    for row in rows[header_row_idx + 1:]:
+        if name_col >= len(row) or row[name_col].value is None:
+            continue
+        name = str(row[name_col].value).strip()
+        if not name:
+            continue
+        employee_no = str(row[id_col].value).strip() if id_col < len(row) and row[id_col].value is not None else ""
+        dates: Set[date] = set()
+        for day, col in day_cols.items():
+            if col < len(row) and is_gray_fill(row[col]):
+                dates.add(valid_dates[day])
+        if dates:
+            key = f"{name}|{employee_no}"
+            result[key] = dates
+            if employee_no:
+                result[employee_no] = dates
+            result[name] = dates
+    return result
+
 def import_employees_from_excel(path: str | Path) -> List[Employee]:
     try:
         from openpyxl import load_workbook  # type: ignore
