@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# App/build outputs
+*.spec
+*.xlsx
+!examples/*.xlsx
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
