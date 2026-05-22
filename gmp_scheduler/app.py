@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 
 from .calendar_utils import is_holiday_or_weekend, month_dates, weekday_ko
 from .database import cumulative_stats, save_schedule, save_unavailable_days, saved_months
-from .excel_io import export_schedule_to_excel, import_employees_from_excel, import_unavailable_from_gray_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_tsv, parse_unavailable
+from .excel_io import export_schedule_to_excel, import_employees_from_excel, import_unavailable_from_gray_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("GMP 근무표 자동 생성기")
-        self.resize(1400, 850)
+        self.resize(1600, 900)
 
         self.employees: List[Employee] = []
         self.result: Optional[ScheduleResult] = None
@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
         self.employee_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         self.paste_box = QTextEdit()
-        self.paste_box.setPlaceholderText("기존 월 근무표 전체를 붙여넣으세요. 예: 성명\t사번\t1\t2\t3... / 값: S, D, 당직, 지휴, G/지근")
+        self.paste_box.setPlaceholderText("보조 입력칸입니다. 권장 방식: 엑셀에서 표 범위 복사 → 위쪽 [엑셀 근무표 붙여넣기] 또는 [회색 불가일 붙여넣기] 버튼 클릭")
         self.paste_box.setMaximumHeight(100)
 
         self.schedule_table = PasteTableWidget(0, 0, allow_expand=False)
@@ -136,6 +136,9 @@ class MainWindow(QMainWindow):
             Employee("최지은", "1005"),
             Employee("정도윤", "1006"),
         ])
+        self.employees = self.collect_employees()
+        self.result = ScheduleResult(self.year_spin.value(), self.month_spin.value(), self.employees, {d: {e.key: OFF for e in self.employees} for d in month_dates(self.year_spin.value(), self.month_spin.value())}, set())
+        self.render_schedule_table()
 
     def _build_rule_widgets(self) -> None:
         def spin(value: int, minimum: int = 0, maximum: int = 31) -> QSpinBox:
@@ -183,30 +186,33 @@ class MainWindow(QMainWindow):
         validate_btn.clicked.connect(self.refresh_validation_and_stats)
         add_btn = QPushButton("직원 행 추가")
         add_btn.clicked.connect(lambda: self.employee_table.insertRow(self.employee_table.rowCount()))
-        paste_btn = QPushButton("기존 근무표 붙여넣기 반영")
-        paste_btn.clicked.connect(self.apply_pasted_employees)
+        paste_btn = QPushButton("엑셀 근무표 붙여넣기")
+        paste_btn.clicked.connect(self.paste_schedule_from_clipboard)
+        paste_unavailable_btn = QPushButton("회색 불가일 붙여넣기")
+        paste_unavailable_btn.clicked.connect(self.paste_unavailable_from_clipboard)
         top.addWidget(generate_btn)
         top.addWidget(validate_btn)
         top.addWidget(add_btn)
         top.addWidget(paste_btn)
+        top.addWidget(paste_unavailable_btn)
         top.addStretch(1)
         root_layout.addLayout(top)
 
         splitter = QSplitter(Qt.Vertical)
         tabs = QTabWidget()
 
-        employee_tab = QWidget()
-        employee_layout = QVBoxLayout(employee_tab)
-        employee_layout.addWidget(QLabel("기존 엑셀 근무표를 아래 박스에 통째로 붙여넣고 반영하세요. 형식: 성명/사번/1일~말일, 값: S, D, 당직, 지휴, G/지근"))
-        employee_layout.addWidget(self.employee_table)
-        employee_layout.addWidget(self.paste_box)
-        tabs.addTab(employee_tab, "직원 관리")
-
         schedule_tab = QWidget()
         schedule_layout = QVBoxLayout(schedule_tab)
-        schedule_layout.addWidget(QLabel("근무표: 셀을 직접 수정할 수 있습니다. 사용 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
+        schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 [엑셀 근무표 붙여넣기]를 누르세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
         schedule_layout.addWidget(self.schedule_table)
         tabs.addTab(schedule_tab, "월간 근무표")
+
+        employee_tab = QWidget()
+        employee_layout = QVBoxLayout(employee_tab)
+        employee_layout.addWidget(QLabel("직원 목록/불가일 확인용입니다. 회색 불가일도 엑셀에서 복사 후 [회색 불가일 붙여넣기]로 반영합니다."))
+        employee_layout.addWidget(self.employee_table)
+        employee_layout.addWidget(self.paste_box)
+        tabs.addTab(employee_tab, "직원/불가일")
 
         stats_tab = QWidget()
         stats_layout = QVBoxLayout(stats_tab)
@@ -302,6 +308,58 @@ class MainWindow(QMainWindow):
     def _cell_text(table: QTableWidget, row: int, col: int) -> str:
         item = table.item(row, col)
         return item.text().strip() if item else ""
+
+    def _clipboard_text_html(self) -> tuple[str, str]:
+        mime = QApplication.clipboard().mimeData()
+        return QApplication.clipboard().text(), mime.html() if mime and mime.hasHtml() else ""
+
+    def paste_schedule_from_clipboard(self) -> None:
+        text, html = self._clipboard_text_html()
+        if not text.strip() and not html.strip():
+            QMessageBox.warning(self, "붙여넣기 실패", "클립보드가 비어 있습니다. 엑셀에서 표 범위를 먼저 복사하세요.")
+            return
+        self.sync_rules_from_widgets()
+        try:
+            self.result = parse_schedule_from_clipboard(text, html, self.year_spin.value(), self.month_spin.value(), self.rules)
+        except Exception as exc:
+            QMessageBox.warning(self, "붙여넣기 실패", f"근무표를 읽지 못했습니다.\n{exc}")
+            return
+        self.employees = self.result.employees
+        self.add_employee_rows(self.employees)
+        self.render_schedule_table()
+        self.refresh_validation_and_stats()
+
+    def paste_unavailable_from_clipboard(self) -> None:
+        text, html = self._clipboard_text_html()
+        if not html.strip():
+            QMessageBox.warning(self, "붙여넣기 실패", "회색 셀은 텍스트 붙여넣기로 인식할 수 없습니다. 엑셀에서 표 범위를 복사한 뒤 이 버튼을 누르세요.")
+            return
+        self.employees = self.collect_employees()
+        if not self.employees and self.result:
+            self.employees = self.result.employees
+        if not self.employees:
+            QMessageBox.warning(self, "불가일 반영 실패", "먼저 근무표를 붙여넣어 직원 목록을 만든 뒤 회색 불가일을 반영하세요.")
+            return
+        try:
+            unavailable_map = parse_unavailable_from_clipboard(text, html, self.year_spin.value(), self.month_spin.value())
+        except Exception as exc:
+            QMessageBox.warning(self, "불가일 반영 실패", str(exc))
+            return
+        hit = 0
+        updated = []
+        for emp in self.employees:
+            dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
+            if dates:
+                hit += len(dates)
+                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates)))
+            else:
+                updated.append(emp)
+        self.employees = updated
+        self.add_employee_rows(self.employees)
+        if self.result:
+            self.result.employees = self.employees
+            self.refresh_validation_and_stats()
+        QMessageBox.information(self, "불가일 반영", f"회색 셀 불가일 {hit}건을 반영했습니다.")
 
     def apply_pasted_employees(self) -> None:
         text = self.paste_box.toPlainText()

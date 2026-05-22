@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -94,6 +95,166 @@ def _header_day(value: object) -> Optional[int]:
         return day
     return None
 
+
+
+class _HTMLTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: List[List[dict]] = []
+        self._current_row: Optional[List[dict]] = None
+        self._current_cell: Optional[dict] = None
+        self._capture = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attrs_dict = {k.lower(): (v or "") for k, v in attrs}
+        if tag.lower() == "tr":
+            self._current_row = []
+        elif tag.lower() in ("td", "th") and self._current_row is not None:
+            self._current_cell = {
+                "text": "",
+                "style": attrs_dict.get("style", ""),
+                "bgcolor": attrs_dict.get("bgcolor", ""),
+            }
+            self._capture = True
+
+    def handle_data(self, data: str) -> None:
+        if self._capture and self._current_cell is not None:
+            self._current_cell["text"] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in ("td", "th") and self._current_row is not None and self._current_cell is not None:
+            self._current_cell["text"] = " ".join(self._current_cell["text"].split())
+            self._current_row.append(self._current_cell)
+            self._current_cell = None
+            self._capture = False
+        elif tag == "tr" and self._current_row is not None:
+            if self._current_row:
+                self.rows.append(self._current_row)
+            self._current_row = None
+
+
+def _hex_to_rgb(value: str) -> Optional[tuple[int, int, int]]:
+    value = value.strip().strip('"\'')
+    if not value:
+        return None
+    if value.startswith("#"):
+        value = value[1:]
+    if len(value) == 3:
+        value = "".join(ch * 2 for ch in value)
+    if len(value) != 6:
+        return None
+    try:
+        return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    except ValueError:
+        return None
+
+
+def _css_rgb_to_tuple(value: str) -> Optional[tuple[int, int, int]]:
+    match = re.search(r"rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)", value, flags=re.I)
+    if not match:
+        return None
+    return tuple(int(match.group(i)) for i in range(1, 4))  # type: ignore[return-value]
+
+
+def _cell_color_from_html_cell(cell: dict) -> Optional[tuple[int, int, int]]:
+    style = cell.get("style", "") or ""
+    bgcolor = cell.get("bgcolor", "") or ""
+    if bgcolor:
+        rgb = _hex_to_rgb(bgcolor)
+        if rgb:
+            return rgb
+    # Excel/Sheets usually use background, background-color, or mso-pattern.
+    for pattern in (
+        r"background(?:-color)?\s*:\s*([^;]+)",
+        r"mso-pattern\s*:[^#;]*(#[0-9a-fA-F]{6})",
+    ):
+        match = re.search(pattern, style, flags=re.I)
+        if not match:
+            continue
+        raw = match.group(1).strip()
+        rgb = _css_rgb_to_tuple(raw) or _hex_to_rgb(raw)
+        if rgb:
+            return rgb
+    return None
+
+
+def is_gray_rgb(rgb: Optional[tuple[int, int, int]]) -> bool:
+    if rgb is None:
+        return False
+    r, g, b = rgb
+    if (r, g, b) in ((255, 255, 255), (0, 0, 0)):
+        return False
+    return max(r, g, b) - min(r, g, b) <= 22 and 65 <= (r + g + b) / 3 <= 240
+
+
+def parse_html_table(html: str) -> List[List[dict]]:
+    parser = _HTMLTableParser()
+    parser.feed(html or "")
+    return parser.rows
+
+
+def _rows_to_text_matrix(rows: List[List[dict]]) -> List[List[str]]:
+    return [[str(cell.get("text", "")).strip() for cell in row] for row in rows]
+
+
+def parse_schedule_from_clipboard(text: str, html: str, year: int, month: int, rules: Optional[ShiftRules] = None) -> ScheduleResult:
+    html_rows = parse_html_table(html)
+    if html_rows:
+        tsv = "\n".join("\t".join(row) for row in _rows_to_text_matrix(html_rows))
+        return parse_schedule_from_tsv(tsv, year, month, rules)
+    return parse_schedule_from_tsv(text, year, month, rules)
+
+
+def parse_unavailable_from_clipboard(text: str, html: str, year: int, month: int) -> Dict[str, Set[date]]:
+    html_rows = parse_html_table(html)
+    if not html_rows:
+        raise ValueError("클립보드에 셀 색상 정보가 없습니다. 엑셀에서 범위를 복사한 뒤 바로 붙여넣으세요.")
+
+    rows = html_rows
+    header_index = 0
+    name_col = 0
+    id_col = 1
+    for idx, row in enumerate(rows[:8]):
+        values = [str(c.get("text", "")).strip().replace(" ", "").lower() for c in row]
+        if any(v in ("성명", "이름", "name") for v in values):
+            header_index = idx
+            for col, v in enumerate(values):
+                if v in ("성명", "이름", "name"):
+                    name_col = col
+                if v in ("사번", "직번", "id", "employeeid", "employee_id"):
+                    id_col = col
+            break
+
+    valid_dates = {d.day: d for d in month_dates(year, month)}
+    day_cols: Dict[int, int] = {}
+    for col, cell in enumerate(rows[header_index]):
+        day = _header_day(cell.get("text", ""))
+        if day in valid_dates:
+            day_cols[day] = col
+    if not day_cols:
+        for offset, d in enumerate(month_dates(year, month), start=2):
+            day_cols[d.day] = offset
+
+    result: Dict[str, Set[date]] = {}
+    for row in rows[header_index + 1:]:
+        if name_col >= len(row):
+            continue
+        name = str(row[name_col].get("text", "")).strip()
+        if not name:
+            continue
+        employee_no = str(row[id_col].get("text", "")).strip() if id_col < len(row) else ""
+        dates: Set[date] = set()
+        for day, col in day_cols.items():
+            if col < len(row) and is_gray_rgb(_cell_color_from_html_cell(row[col])):
+                dates.add(valid_dates[day])
+        if dates:
+            key = f"{name}|{employee_no}"
+            result[key] = dates
+            if employee_no:
+                result[employee_no] = dates
+            result[name] = dates
+    return result
 
 def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[ShiftRules] = None) -> ScheduleResult:
     rows = [[cell.strip() for cell in line.split("\t")] for line in text.splitlines() if line.strip()]
