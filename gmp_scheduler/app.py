@@ -6,13 +6,15 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -50,6 +52,42 @@ WARNING_COLOR = QColor("#f4cccc")
 HOLIDAY_HEADER_COLOR = QColor("#f4cccc")
 
 
+class PasteTableWidget(QTableWidget):
+    """QTableWidget with Excel-style tab/newline paste support."""
+
+    def __init__(self, *args, allow_expand: bool = True, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.allow_expand = allow_expand
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectItems)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.matches(QKeySequence.Paste):
+            text = QApplication.clipboard().text()
+            self.paste_text(text)
+            return
+        super().keyPressEvent(event)
+
+    def paste_text(self, text: str) -> None:
+        if not text:
+            return
+        start_row = max(0, self.currentRow())
+        start_col = max(0, self.currentColumn())
+        rows = [line.split("\t") for line in text.rstrip("\n").splitlines()]
+        if not rows:
+            return
+        if self.allow_expand:
+            self.setRowCount(max(self.rowCount(), start_row + len(rows)))
+            self.setColumnCount(max(self.columnCount(), start_col + max(len(r) for r in rows)))
+        for r_offset, values in enumerate(rows):
+            for c_offset, value in enumerate(values):
+                row = start_row + r_offset
+                col = start_col + c_offset
+                if row >= self.rowCount() or col >= self.columnCount():
+                    continue
+                self.setItem(row, col, QTableWidgetItem(value.strip()))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -68,7 +106,9 @@ class MainWindow(QMainWindow):
         self.month_spin.setRange(1, 12)
         self.month_spin.setValue(date.today().month)
 
-        self.employee_table = QTableWidget(0, 4)
+        self._build_rule_widgets()
+
+        self.employee_table = PasteTableWidget(0, 4, allow_expand=True)
         self.employee_table.setHorizontalHeaderLabels(["성명", "사번", "신규", "불가일(YYYY-MM-DD, ...)"])
         self.employee_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
@@ -76,7 +116,7 @@ class MainWindow(QMainWindow):
         self.paste_box.setPlaceholderText("엑셀에서 성명\t사번\t신규(Y/N)\t불가일 형태로 붙여넣기")
         self.paste_box.setMaximumHeight(100)
 
-        self.schedule_table = QTableWidget()
+        self.schedule_table = PasteTableWidget(0, 0, allow_expand=False)
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
 
         self.stats_table = QTableWidget()
@@ -92,6 +132,25 @@ class MainWindow(QMainWindow):
             Employee("최지은", "1005"),
             Employee("정도윤", "1006"),
         ])
+
+    def _build_rule_widgets(self) -> None:
+        def spin(value: int, minimum: int = 0, maximum: int = 31) -> QSpinBox:
+            widget = QSpinBox()
+            widget.setRange(minimum, maximum)
+            widget.setValue(value)
+            return widget
+
+        self.weekday_day_spin = spin(self.rules.min_weekday.get("Day", 1))
+        self.weekday_sw_spin = spin(self.rules.min_weekday.get("SW", 1))
+        self.weekday_gy_spin = spin(self.rules.min_weekday.get("GY", 1))
+        self.holiday_day_spin = spin(self.rules.min_holiday.get("Day", 1))
+        self.holiday_sw_spin = spin(self.rules.min_holiday.get("SW", 1))
+        self.holiday_gy_spin = spin(self.rules.min_holiday.get("GY", 1))
+        self.saturday_duty_check = QCheckBox("토요일 토당 자동 배정")
+        self.saturday_duty_check.setChecked(self.rules.saturday_duty_min > 0)
+        self.saturday_duty_spin = spin(self.rules.saturday_duty_min)
+        self.max_consecutive_spin = spin(self.rules.max_consecutive_work_days, 1)
+        self.max_consecutive_gy_spin = spin(self.rules.max_consecutive_gy, 1)
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("main")
@@ -147,6 +206,33 @@ class MainWindow(QMainWindow):
         stats_layout.addWidget(self.stats_table)
         tabs.addTab(stats_tab, "통계")
 
+        settings_tab = QWidget()
+        settings_layout = QHBoxLayout(settings_tab)
+        weekday_group = QGroupBox("평일 최소 인원")
+        weekday_form = QFormLayout(weekday_group)
+        weekday_form.addRow("Day", self.weekday_day_spin)
+        weekday_form.addRow("SW", self.weekday_sw_spin)
+        weekday_form.addRow("GY", self.weekday_gy_spin)
+
+        holiday_group = QGroupBox("휴일/주말 최소 인원")
+        holiday_form = QFormLayout(holiday_group)
+        holiday_form.addRow("Day", self.holiday_day_spin)
+        holiday_form.addRow("SW", self.holiday_sw_spin)
+        holiday_form.addRow("GY", self.holiday_gy_spin)
+
+        rule_group = QGroupBox("제약")
+        rule_form = QFormLayout(rule_group)
+        rule_form.addRow(self.saturday_duty_check)
+        rule_form.addRow("토당 최소 인원", self.saturday_duty_spin)
+        rule_form.addRow("최대 연속 근무", self.max_consecutive_spin)
+        rule_form.addRow("최대 연속 GY", self.max_consecutive_gy_spin)
+
+        settings_layout.addWidget(weekday_group)
+        settings_layout.addWidget(holiday_group)
+        settings_layout.addWidget(rule_group)
+        settings_layout.addStretch(1)
+        tabs.addTab(settings_tab, "근무 설정")
+
         splitter.addWidget(tabs)
         splitter.addWidget(self.warning_box)
         splitter.setSizes([650, 160])
@@ -164,9 +250,26 @@ class MainWindow(QMainWindow):
             unavailable = ", ".join(sorted(d.isoformat() for d in emp.unavailable_dates))
             self.employee_table.setItem(row, 3, QTableWidgetItem(unavailable))
 
+    def sync_rules_from_widgets(self) -> None:
+        self.rules.min_weekday = {
+            "Day": self.weekday_day_spin.value(),
+            "SW": self.weekday_sw_spin.value(),
+            "GY": self.weekday_gy_spin.value(),
+        }
+        self.rules.min_holiday = {
+            "Day": self.holiday_day_spin.value(),
+            "SW": self.holiday_sw_spin.value(),
+            "GY": self.holiday_gy_spin.value(),
+        }
+        self.rules.saturday_duty_min = self.saturday_duty_spin.value() if self.saturday_duty_check.isChecked() else 0
+        self.rules.max_consecutive_work_days = self.max_consecutive_spin.value()
+        self.rules.max_consecutive_gy = self.max_consecutive_gy_spin.value()
+
     def collect_employees(self) -> List[Employee]:
         employees: List[Employee] = []
         seen = set()
+        year = self.year_spin.value()
+        month = self.month_spin.value()
         for row in range(self.employee_table.rowCount()):
             name_item = self.employee_table.item(row, 0)
             if not name_item or not name_item.text().strip():
@@ -175,7 +278,7 @@ class MainWindow(QMainWindow):
             employee_id = self._cell_text(self.employee_table, row, 1)
             is_new_text = self._cell_text(self.employee_table, row, 2).lower()
             is_new = is_new_text in ("y", "yes", "true", "1", "신규", "ㅇ", "o")
-            unavailable = parse_unavailable(self._cell_text(self.employee_table, row, 3))
+            unavailable = parse_unavailable(self._cell_text(self.employee_table, row, 3), year, month)
             emp = Employee(name=name, employee_id=employee_id, is_new=is_new, unavailable_dates=unavailable)
             if emp.key in seen:
                 continue
@@ -232,6 +335,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "저장 완료", path)
 
     def generate_schedule(self) -> None:
+        self.sync_rules_from_widgets()
         self.employees = self.collect_employees()
         if len(self.employees) < 3:
             QMessageBox.warning(self, "생성 불가", "Day/SW/GY 최소 인원을 채우려면 직원이 최소 3명 필요합니다.")
@@ -330,6 +434,7 @@ class MainWindow(QMainWindow):
                 self.result.schedule[d][emp.key] = shift
 
     def refresh_validation_and_stats(self) -> None:
+        self.sync_rules_from_widgets()
         if not self.result:
             return
         self.result.warnings = validate_schedule(

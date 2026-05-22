@@ -18,7 +18,7 @@ SHIFT_FILLS = {
 }
 
 
-def parse_date(value) -> Optional[date]:
+def parse_date(value, default_year: Optional[int] = None, default_month: Optional[int] = None) -> Optional[date]:
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
@@ -31,15 +31,21 @@ def parse_date(value) -> Optional[date]:
             return datetime.strptime(text, fmt).date()
         except ValueError:
             pass
+    if default_year and default_month:
+        try:
+            day = int(text)
+            return date(default_year, default_month, day)
+        except ValueError:
+            pass
     return None
 
 
-def parse_unavailable(text: object) -> Set[date]:
+def parse_unavailable(text: object, default_year: Optional[int] = None, default_month: Optional[int] = None) -> Set[date]:
     if not text:
         return set()
     result: Set[date] = set()
     for part in str(text).replace(";", ",").replace(" ", ",").split(","):
-        d = parse_date(part.strip())
+        d = parse_date(part.strip(), default_year, default_month)
         if d:
             result.add(d)
     return result
