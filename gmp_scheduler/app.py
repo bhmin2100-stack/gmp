@@ -91,6 +91,25 @@ class PasteTableWidget(QTableWidget):
                 self.setItem(row, col, QTableWidgetItem(value.strip()))
 
 
+class MonthRosterTable(PasteTableWidget):
+    """A month table in the yearly view that accepts Ctrl+V directly."""
+
+    def __init__(self, owner: "MainWindow", year: int, month: int, *args, **kwargs) -> None:
+        super().__init__(*args, allow_expand=False, **kwargs)
+        self.owner = owner
+        self.year = year
+        self.month = month
+        self.setToolTip("이 월 표를 클릭한 뒤 Ctrl+V 하면 엑셀 근무표가 바로 붙여넣어집니다.")
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.matches(QKeySequence.Paste):
+            self.owner.paste_schedule_from_clipboard_for_month(self.year, self.month)
+            return
+        super().keyPressEvent(event)
+
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -201,7 +220,7 @@ class MainWindow(QMainWindow):
 
         year_tab = QWidget()
         year_layout = QVBoxLayout(year_tab)
-        year_layout.addWidget(QLabel("연도 전체 근무표입니다. 마우스 휠로 1월부터 12월까지 내려보세요. DB에 저장된 월은 자동으로 채워집니다."))
+        year_layout.addWidget(QLabel("연도 전체 근무표입니다. 각 월 표를 클릭하고 Ctrl+V 하면 그 월에 엑셀 근무표가 바로 붙습니다. 마우스 휠로 1월~12월을 내려보세요."))
         self.year_scroll = QScrollArea()
         self.year_scroll.setWidgetResizable(True)
         self.year_scroll_content = QWidget()
@@ -322,25 +341,30 @@ class MainWindow(QMainWindow):
         mime = QApplication.clipboard().mimeData()
         return QApplication.clipboard().text(), mime.html() if mime and mime.hasHtml() else ""
 
-    def paste_schedule_from_clipboard(self) -> None:
+    def paste_schedule_from_clipboard_for_month(self, year: int, month: int) -> None:
         text, html = self._clipboard_text_html()
         if not text.strip() and not html.strip():
             QMessageBox.warning(self, "붙여넣기 실패", "클립보드가 비어 있습니다. 엑셀에서 표 범위를 먼저 복사하세요.")
             return
         self.sync_rules_from_widgets()
         try:
-            self.result = parse_schedule_from_clipboard(text, html, self.year_spin.value(), self.month_spin.value(), self.rules)
+            pasted = parse_schedule_from_clipboard(text, html, year, month, self.rules)
         except Exception as exc:
-            QMessageBox.warning(self, "붙여넣기 실패", f"근무표를 읽지 못했습니다.\n{exc}")
+            QMessageBox.warning(self, "붙여넣기 실패", f"{year}년 {month}월 근무표를 읽지 못했습니다.\n{exc}")
             return
-        # The pasted roster is authoritative for this month: add new people,
-        # remove people not present in the pasted sheet, and preserve every row.
-        self.employees = list(self.result.employees)
+
+        self.year_spin.setValue(year)
+        self.month_spin.setValue(month)
+        self.result = pasted
+        self.employees = list(pasted.employees)
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
         self.render_year_overview()
-        QMessageBox.information(self, "근무표 반영", f"붙여넣은 근무표에서 {len(self.employees)}명을 인식했습니다.")
+        QMessageBox.information(self, "근무표 반영", f"{year}년 {month}월 표에서 {len(self.employees)}명을 인식했습니다.")
+
+    def paste_schedule_from_clipboard(self) -> None:
+        self.paste_schedule_from_clipboard_for_month(self.year_spin.value(), self.month_spin.value())
 
     def paste_unavailable_from_clipboard(self) -> None:
         text, html = self._clipboard_text_html()
@@ -467,27 +491,37 @@ class MainWindow(QMainWindow):
 
     def _make_schedule_view_table(self, result: ScheduleResult) -> QTableWidget:
         dates = month_dates(result.year, result.month)
-        table = QTableWidget(len(result.employees), len(dates) + 2)
+        row_count = max(1, len(result.employees))
+        table = MonthRosterTable(self, result.year, result.month, row_count, len(dates) + 2)
         table.setHorizontalHeaderLabels(["성명", "사번"] + [str(d.day) for d in dates])
         table.verticalHeader().setVisible(False)
         for col, d in enumerate(dates, start=2):
             item = table.horizontalHeaderItem(col)
             if item and is_holiday_or_weekend(d, result.holidays):
                 item.setBackground(HOLIDAY_HEADER_COLOR)
-        for row, emp in enumerate(result.employees):
-            table.setItem(row, 0, QTableWidgetItem(emp.name))
-            table.setItem(row, 1, QTableWidgetItem(emp.employee_id))
-            for col, d in enumerate(dates, start=2):
-                shift = result.schedule.get(d, {}).get(emp.key, OFF)
-                cell = QTableWidgetItem(shift)
-                cell.setTextAlignment(Qt.AlignCenter)
-                cell.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
-                cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
-                table.setItem(row, col, cell)
+        if not result.employees:
+            hint = QTableWidgetItem("여기에 클릭 후 Ctrl+V")
+            hint.setTextAlignment(Qt.AlignCenter)
+            hint.setBackground(QColor("#fff2cc"))
+            table.setItem(0, 0, hint)
+            table.setItem(0, 1, QTableWidgetItem("엑셀 표 복사"))
+            for col in range(2, len(dates) + 2):
+                table.setItem(0, col, QTableWidgetItem(""))
+        else:
+            for row, emp in enumerate(result.employees):
+                table.setItem(row, 0, QTableWidgetItem(emp.name))
+                table.setItem(row, 1, QTableWidgetItem(emp.employee_id))
+                for col, d in enumerate(dates, start=2):
+                    shift = result.schedule.get(d, {}).get(emp.key, OFF)
+                    cell = QTableWidgetItem(shift)
+                    cell.setTextAlignment(Qt.AlignCenter)
+                    cell.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                    cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+                    table.setItem(row, col, cell)
         for row in range(table.rowCount()):
             table.setRowHeight(row, 24)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.setMinimumHeight(min(520, 70 + max(1, len(result.employees)) * 28))
+        table.setMinimumHeight(min(520, 72 + row_count * 28))
         return table
 
     def render_year_overview(self) -> None:
