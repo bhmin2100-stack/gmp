@@ -5,6 +5,9 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -26,10 +29,17 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --noconsole --onefile --name "GMP근무표" main.py
+          pyinstaller --noconsole --onefile --name "GMP-Scheduler" main.py
 
-      - name: Upload EXE artifact
-        uses: actions/upload-artifact@v4
+      - name: Publish EXE to release
+        uses: softprops/action-gh-release@v2
         with:
-          name: GMP근무표-windows-exe
-          path: dist/GMP근무표.exe
+          tag_name: windows-latest
+          name: Windows EXE Latest
+          body: |
+            Windows executable build for GMP shift scheduler.
+            Download GMP-Scheduler.exe and run it directly on Windows.
+          files: dist/GMP-Scheduler.exe
+          prerelease: true
+          make_latest: true
+          overwrite_files: true
