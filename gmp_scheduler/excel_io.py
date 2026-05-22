@@ -292,12 +292,19 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
     holidays = korean_holidays(year)
     employees: List[Employee] = []
     schedule: ScheduleMap = {d: {} for d in month_dates(year, month)}
+    seen_keys: Dict[str, int] = {}
 
     for row in rows[header_index + 1:]:
         if name_col >= len(row) or not row[name_col].strip():
             continue
         name = row[name_col].strip()
         employee_id = row[id_col].strip() if id_col < len(row) else ""
+        base_key = f"{name}|{employee_id}"
+        seen_keys[base_key] = seen_keys.get(base_key, 0) + 1
+        if seen_keys[base_key] > 1:
+            # Same name+employee number duplicated in source. Keep both rows visible
+            # instead of overwriting the first row in the schedule map.
+            employee_id = f"{employee_id}#{seen_keys[base_key]}" if employee_id else f"row{seen_keys[base_key]}"
         emp = Employee(name=name, employee_id=employee_id)
         employees.append(emp)
         for d in month_dates(year, month):

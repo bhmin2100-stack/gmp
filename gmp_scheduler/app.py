@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .database import cumulative_stats, load_schedule_result, save_schedule, save_unavailable_days, saved_months
-from .excel_io import export_schedule_to_excel, import_employees_from_excel, import_unavailable_from_gray_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
+from .excel_io import export_schedule_to_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
@@ -129,16 +129,15 @@ class MainWindow(QMainWindow):
         self.warning_box.setReadOnly(True)
 
         self._build_ui()
-        self.add_employee_rows([
-            Employee("홍길동", "1001"),
-            Employee("김철수", "1002"),
-            Employee("이영희", "1003"),
-            Employee("박민수", "1004", is_new=True),
-            Employee("최지은", "1005"),
-            Employee("정도윤", "1006"),
-        ])
-        self.employees = self.collect_employees()
-        self.result = ScheduleResult(self.year_spin.value(), self.month_spin.value(), self.employees, {d: {e.key: OFF for e in self.employees} for d in month_dates(self.year_spin.value(), self.month_spin.value())}, korean_holidays(self.year_spin.value()))
+        self.employees = []
+        self.add_employee_rows([])
+        self.result = ScheduleResult(
+            self.year_spin.value(),
+            self.month_spin.value(),
+            self.employees,
+            {d: {} for d in month_dates(self.year_spin.value(), self.month_spin.value())},
+            korean_holidays(self.year_spin.value()),
+        )
         self.render_schedule_table()
         self.render_year_overview()
 
@@ -161,16 +160,10 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         toolbar = QToolBar("main")
         self.addToolBar(toolbar)
-        import_action = QAction("직원 엑셀 불러오기", self)
-        import_action.triggered.connect(self.import_excel)
-        unavailable_action = QAction("회색 불가일 엑셀", self)
-        unavailable_action.triggered.connect(self.import_unavailable_excel)
         save_db_action = QAction("현재 근무표 DB 저장", self)
         save_db_action.triggered.connect(self.save_current_schedule_to_db)
         export_action = QAction("엑셀 저장", self)
         export_action.triggered.connect(self.export_excel)
-        toolbar.addAction(import_action)
-        toolbar.addAction(unavailable_action)
         toolbar.addAction(save_db_action)
         toolbar.addAction(export_action)
 
@@ -340,11 +333,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "붙여넣기 실패", f"근무표를 읽지 못했습니다.\n{exc}")
             return
-        self.employees = self.result.employees
+        # The pasted roster is authoritative for this month: add new people,
+        # remove people not present in the pasted sheet, and preserve every row.
+        self.employees = list(self.result.employees)
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
         self.render_year_overview()
+        QMessageBox.information(self, "근무표 반영", f"붙여넣은 근무표에서 {len(self.employees)}명을 인식했습니다.")
 
     def paste_unavailable_from_clipboard(self) -> None:
         text, html = self._clipboard_text_html()
@@ -401,38 +397,6 @@ class MainWindow(QMainWindow):
         self.refresh_validation_and_stats()
         self.paste_box.clear()
 
-    def import_unavailable_excel(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "회색 불가일 엑셀 불러오기", "", "Excel Files (*.xlsx *.xlsm)")
-        if not path:
-            return
-        self.employees = self.collect_employees()
-        if not self.employees and self.result:
-            self.employees = self.result.employees
-        if not self.employees:
-            QMessageBox.warning(self, "불러오기 실패", "먼저 기존 근무표를 붙여넣거나 직원 목록을 입력하세요.")
-            return
-        try:
-            unavailable_map = import_unavailable_from_gray_excel(path, self.year_spin.value(), self.month_spin.value())
-        except Exception as exc:
-            QMessageBox.critical(self, "불러오기 실패", str(exc))
-            return
-        hit = 0
-        updated = []
-        for emp in self.employees:
-            dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
-            if dates:
-                hit += len(dates)
-                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates)))
-            else:
-                updated.append(emp)
-        self.employees = updated
-        self.add_employee_rows(self.employees)
-        if self.result:
-            self.result.employees = self.employees
-            save_unavailable_days(self.employees, Path(path).name)
-            self.refresh_validation_and_stats()
-        QMessageBox.information(self, "불가일 반영", f"회색 셀 불가일 {hit}건을 반영했습니다.")
-
     def save_current_schedule_to_db(self) -> None:
         if not self.result:
             QMessageBox.warning(self, "DB 저장 불가", "먼저 기존 근무표를 붙여넣거나 자동 생성하세요.")
@@ -449,20 +413,6 @@ class MainWindow(QMainWindow):
         self.render_cumulative_stats()
         self.render_year_overview()
         QMessageBox.information(self, "DB 저장 완료", f"근무표를 DB에 저장했습니다. ID: {schedule_id}")
-
-    def import_excel(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "직원 엑셀 불러오기", "", "Excel Files (*.xlsx *.xlsm)")
-        if not path:
-            return
-        try:
-            employees = import_employees_from_excel(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "불러오기 실패", str(exc))
-            return
-        if not employees:
-            QMessageBox.warning(self, "불러오기 실패", "직원 데이터를 찾지 못했습니다. 헤더는 성명/사번/신규/불가일을 권장합니다.")
-            return
-        self.add_employee_rows(employees)
 
     def export_excel(self) -> None:
         if not self.result:
@@ -545,7 +495,6 @@ class MainWindow(QMainWindow):
             return
         self._clear_layout(self.year_scroll_layout)
         year = self.year_spin.value()
-        current_employees = self.collect_employees() or self.employees
         for month in range(1, 13):
             loaded = load_schedule_result(year, month)
             if self.result and self.result.year == year and self.result.month == month:
@@ -555,8 +504,8 @@ class MainWindow(QMainWindow):
                 result = loaded
                 status = "DB 저장됨"
             else:
-                employees = current_employees
-                schedule = {d: {e.key: OFF for e in employees} for d in month_dates(year, month)}
+                employees = []
+                schedule = {d: {} for d in month_dates(year, month)}
                 result = ScheduleResult(year, month, employees, schedule, korean_holidays(year))
                 status = "미저장"
             title = QLabel(f"{year}년 {month}월 · {status}")
