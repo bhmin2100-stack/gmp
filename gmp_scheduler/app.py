@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -32,8 +33,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .calendar_utils import is_holiday_or_weekend, month_dates, weekday_ko
-from .database import cumulative_stats, save_schedule, save_unavailable_days, saved_months
+from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
+from .database import cumulative_stats, load_schedule_result, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, import_employees_from_excel, import_unavailable_from_gray_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .scheduler import ScheduleError, generate_month_schedule
@@ -137,8 +138,9 @@ class MainWindow(QMainWindow):
             Employee("정도윤", "1006"),
         ])
         self.employees = self.collect_employees()
-        self.result = ScheduleResult(self.year_spin.value(), self.month_spin.value(), self.employees, {d: {e.key: OFF for e in self.employees} for d in month_dates(self.year_spin.value(), self.month_spin.value())}, set())
+        self.result = ScheduleResult(self.year_spin.value(), self.month_spin.value(), self.employees, {d: {e.key: OFF for e in self.employees} for d in month_dates(self.year_spin.value(), self.month_spin.value())}, korean_holidays(self.year_spin.value()))
         self.render_schedule_table()
+        self.render_year_overview()
 
     def _build_rule_widgets(self) -> None:
         def spin(value: int, minimum: int = 0, maximum: int = 31) -> QSpinBox:
@@ -184,6 +186,8 @@ class MainWindow(QMainWindow):
         generate_btn.clicked.connect(self.generate_schedule)
         validate_btn = QPushButton("검증/통계 갱신")
         validate_btn.clicked.connect(self.refresh_validation_and_stats)
+        refresh_year_btn = QPushButton("연간 보기 갱신")
+        refresh_year_btn.clicked.connect(self.render_year_overview)
         add_btn = QPushButton("직원 행 추가")
         add_btn.clicked.connect(lambda: self.employee_table.insertRow(self.employee_table.rowCount()))
         paste_btn = QPushButton("엑셀 근무표 붙여넣기")
@@ -192,6 +196,7 @@ class MainWindow(QMainWindow):
         paste_unavailable_btn.clicked.connect(self.paste_unavailable_from_clipboard)
         top.addWidget(generate_btn)
         top.addWidget(validate_btn)
+        top.addWidget(refresh_year_btn)
         top.addWidget(add_btn)
         top.addWidget(paste_btn)
         top.addWidget(paste_unavailable_btn)
@@ -200,6 +205,17 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Vertical)
         tabs = QTabWidget()
+
+        year_tab = QWidget()
+        year_layout = QVBoxLayout(year_tab)
+        year_layout.addWidget(QLabel("연도 전체 근무표입니다. 마우스 휠로 1월부터 12월까지 내려보세요. DB에 저장된 월은 자동으로 채워집니다."))
+        self.year_scroll = QScrollArea()
+        self.year_scroll.setWidgetResizable(True)
+        self.year_scroll_content = QWidget()
+        self.year_scroll_layout = QVBoxLayout(self.year_scroll_content)
+        self.year_scroll.setWidget(self.year_scroll_content)
+        year_layout.addWidget(self.year_scroll)
+        tabs.addTab(year_tab, "연간 보기")
 
         schedule_tab = QWidget()
         schedule_layout = QVBoxLayout(schedule_tab)
@@ -328,6 +344,7 @@ class MainWindow(QMainWindow):
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
+        self.render_year_overview()
 
     def paste_unavailable_from_clipboard(self) -> None:
         text, html = self._clipboard_text_html()
@@ -430,6 +447,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "DB 저장 실패", str(exc))
             return
         self.render_cumulative_stats()
+        self.render_year_overview()
         QMessageBox.information(self, "DB 저장 완료", f"근무표를 DB에 저장했습니다. ID: {schedule_id}")
 
     def import_excel(self) -> None:
@@ -485,6 +503,67 @@ class MainWindow(QMainWindow):
             return
         self.render_schedule_table()
         self.refresh_validation_and_stats()
+        self.render_year_overview()
+
+    def _clear_layout(self, layout: QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_layout(child_layout)  # type: ignore[arg-type]
+
+    def _make_schedule_view_table(self, result: ScheduleResult) -> QTableWidget:
+        dates = month_dates(result.year, result.month)
+        table = QTableWidget(len(result.employees), len(dates) + 2)
+        table.setHorizontalHeaderLabels(["성명", "사번"] + [str(d.day) for d in dates])
+        table.verticalHeader().setVisible(False)
+        for col, d in enumerate(dates, start=2):
+            item = table.horizontalHeaderItem(col)
+            if item and is_holiday_or_weekend(d, result.holidays):
+                item.setBackground(HOLIDAY_HEADER_COLOR)
+        for row, emp in enumerate(result.employees):
+            table.setItem(row, 0, QTableWidgetItem(emp.name))
+            table.setItem(row, 1, QTableWidgetItem(emp.employee_id))
+            for col, d in enumerate(dates, start=2):
+                shift = result.schedule.get(d, {}).get(emp.key, OFF)
+                cell = QTableWidgetItem(shift)
+                cell.setTextAlignment(Qt.AlignCenter)
+                cell.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+                table.setItem(row, col, cell)
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, 24)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.setMinimumHeight(min(520, 70 + max(1, len(result.employees)) * 28))
+        return table
+
+    def render_year_overview(self) -> None:
+        if not hasattr(self, "year_scroll_layout"):
+            return
+        self._clear_layout(self.year_scroll_layout)
+        year = self.year_spin.value()
+        current_employees = self.collect_employees() or self.employees
+        for month in range(1, 13):
+            loaded = load_schedule_result(year, month)
+            if self.result and self.result.year == year and self.result.month == month:
+                result = self.result
+                status = "현재 편집 중"
+            elif loaded:
+                result = loaded
+                status = "DB 저장됨"
+            else:
+                employees = current_employees
+                schedule = {d: {e.key: OFF for e in employees} for d in month_dates(year, month)}
+                result = ScheduleResult(year, month, employees, schedule, korean_holidays(year))
+                status = "미저장"
+            title = QLabel(f"{year}년 {month}월 · {status}")
+            title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
+            self.year_scroll_layout.addWidget(title)
+            self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
+        self.year_scroll_layout.addStretch(1)
 
     def render_schedule_table(self) -> None:
         if not self.result:

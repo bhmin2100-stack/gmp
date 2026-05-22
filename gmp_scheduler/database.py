@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
 
 from .calendar_utils import is_holiday_or_weekend, month_dates
-from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult
+from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult
 from .stats import EmployeeStats, compute_stats
 
 DB_PATH = Path("gmp_scheduler.sqlite3")
@@ -169,3 +169,47 @@ def saved_months() -> List[Dict[str, object]]:
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def load_schedule_result(year: int, month: int) -> Optional[ScheduleResult]:
+    """Load the latest saved schedule for a year/month from the local DB."""
+    from .calendar_utils import korean_holidays
+
+    with connect() as conn:
+        sched = conn.execute(
+            """
+            SELECT id, source_name
+            FROM monthly_schedules
+            WHERE year=? AND month=?
+            ORDER BY imported_at DESC, id DESC
+            LIMIT 1
+            """,
+            (year, month),
+        ).fetchone()
+        if not sched:
+            return None
+        rows = conn.execute(
+            """
+            SELECT e.name, e.employee_no, e.is_new, a.work_date, a.shift_code
+            FROM assignments a
+            JOIN employees e ON e.id = a.employee_id
+            WHERE a.schedule_id=?
+            ORDER BY e.name, e.employee_no, a.work_date
+            """,
+            (int(sched["id"]),),
+        ).fetchall()
+        if not rows:
+            return None
+
+        emp_by_key: Dict[str, Employee] = {}
+        for row in rows:
+            emp = Employee(str(row["name"]), str(row["employee_no"] or ""), bool(row["is_new"]))
+            emp_by_key[emp.key] = emp
+        employees = list(emp_by_key.values())
+        schedule: ScheduleMap = {d: {emp.key: OFF for emp in employees} for d in month_dates(year, month)}
+        for row in rows:
+            d = date.fromisoformat(str(row["work_date"]))
+            emp_key = f"{row['name']}|{row['employee_no'] or ''}"
+            if d in schedule:
+                schedule[d][emp_key] = str(row["shift_code"] or OFF)
+        return ScheduleResult(year, month, employees, schedule, korean_holidays(year))
