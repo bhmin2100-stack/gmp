@@ -109,6 +109,29 @@ class MonthRosterTable(PasteTableWidget):
         super().keyPressEvent(event)
 
 
+class CurrentMonthRosterTable(PasteTableWidget):
+    """Main monthly roster table.
+
+    The monthly roster must not use ordinary spreadsheet paste at the clicked
+    cell because users paste the whole existing Excel roster. If we let
+    QTableWidget paste TSV from the current cell, selecting e.g. the 20th day
+    column writes the source "사번" column under the 20th day. Always route
+    Ctrl+V through the schedule parser for the currently selected year/month.
+    """
+
+    def __init__(self, owner: "MainWindow", *args, **kwargs) -> None:
+        super().__init__(*args, allow_expand=False, **kwargs)
+        self.owner = owner
+        self.setToolTip("어느 셀을 클릭해도 Ctrl+V는 엑셀 근무표 전체 붙여넣기로 처리됩니다.")
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.matches(QKeySequence.Paste):
+            self.owner.paste_schedule_from_clipboard()
+            return
+        super().keyPressEvent(event)
+
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -138,7 +161,7 @@ class MainWindow(QMainWindow):
         self.paste_box.setPlaceholderText("보조 입력칸입니다. 권장 방식: 엑셀에서 표 범위 복사 → 위쪽 [엑셀 근무표 붙여넣기] 또는 [회색 불가일 붙여넣기] 버튼 클릭")
         self.paste_box.setMaximumHeight(100)
 
-        self.schedule_table = PasteTableWidget(0, 0, allow_expand=False)
+        self.schedule_table = CurrentMonthRosterTable(self, 0, 0)
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
 
         self.month_stats_table = QTableWidget()
@@ -231,7 +254,7 @@ class MainWindow(QMainWindow):
 
         schedule_tab = QWidget()
         schedule_layout = QVBoxLayout(schedule_tab)
-        schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 [엑셀 근무표 붙여넣기]를 누르세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
+        schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 이 표 아무 셀에 커서를 두고 Ctrl+V 하세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
         schedule_layout.addWidget(self.schedule_table)
         tabs.addTab(schedule_tab, "월간 근무표")
 
