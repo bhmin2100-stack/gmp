@@ -108,6 +108,9 @@ class MonthRosterTable(PasteTableWidget):
             return
         super().keyPressEvent(event)
 
+    def paste_text(self, text: str) -> None:
+        self.owner.paste_schedule_from_clipboard_for_month(self.year, self.month)
+
 
 class CurrentMonthRosterTable(PasteTableWidget):
     """Main monthly roster table.
@@ -131,6 +134,28 @@ class CurrentMonthRosterTable(PasteTableWidget):
             return
         super().keyPressEvent(event)
 
+    def paste_text(self, text: str) -> None:
+        self.owner.paste_schedule_from_clipboard()
+
+
+class ScheduleInputTable(PasteTableWidget):
+    """Input helper table whose paste means 'read the whole roster clipboard'."""
+
+    def __init__(self, owner: "MainWindow", *args, **kwargs) -> None:
+        super().__init__(*args, allow_expand=False, **kwargs)
+        self.owner = owner
+        self.setToolTip("엑셀 근무표 전체를 복사한 뒤 Ctrl+V 하면 현재 월 근무표로 반영됩니다.")
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.matches(QKeySequence.Paste):
+            self.owner.paste_schedule_from_clipboard()
+            return
+        super().keyPressEvent(event)
+
+    def paste_text(self, text: str) -> None:
+        self.owner.paste_schedule_from_clipboard()
+
 
 
 class MainWindow(QMainWindow):
@@ -153,7 +178,7 @@ class MainWindow(QMainWindow):
 
         self._build_rule_widgets()
 
-        self.employee_table = PasteTableWidget(0, 4, allow_expand=True)
+        self.employee_table = ScheduleInputTable(self, 0, 4)
         self.employee_table.setHorizontalHeaderLabels(["성명", "사번", "신규", "불가일(YYYY-MM-DD, ...)"])
         self.employee_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
@@ -379,6 +404,8 @@ class MainWindow(QMainWindow):
             if isinstance(widget, MonthRosterTable):
                 return widget.year, widget.month
             if isinstance(widget, CurrentMonthRosterTable):
+                return self.year_spin.value(), self.month_spin.value()
+            if isinstance(widget, ScheduleInputTable):
                 return self.year_spin.value(), self.month_spin.value()
             widget = widget.parentWidget()
         return None
