@@ -58,7 +58,8 @@ def parse_unavailable(text: object, default_year: Optional[int] = None, default_
 
 def normalize_shift_code(value: object, work_date: Optional[date] = None, holidays: Optional[Set[date]] = None) -> str:
     text = "" if value is None else str(value).strip()
-    text = text.replace(" ", "")
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("／", "/").replace("\\", "/").replace("⁄", "/")
     if not text:
         return OFF
     upper = text.upper()
@@ -66,7 +67,7 @@ def normalize_shift_code(value: object, work_date: Optional[date] = None, holida
         return SHIFT_DAY
     if upper in ("S", "SW", "SWING", "스윙"):
         return SHIFT_SWING
-    if upper in ("G/지근", "G", "GY") or text in ("G/지근", "G/地勤", "지근", "야간"):
+    if upper in ("G/지근", "G/지금", "G지근", "G지금", "G", "GY") or text in ("G/지근", "G/지금", "G지근", "G지금", "G/地勤", "지근", "지금", "야간"):
         if work_date and holidays and is_holiday_or_weekend(work_date, holidays):
             return SHIFT_DUTY
         return SHIFT_GY
