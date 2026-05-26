@@ -5,7 +5,7 @@ from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -171,6 +171,9 @@ class MainWindow(QMainWindow):
         self.warning_box.setReadOnly(True)
 
         self._build_ui()
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
         self.employees = []
         self.add_employee_rows([])
         self.result = ScheduleResult(
@@ -363,6 +366,31 @@ class MainWindow(QMainWindow):
     def _clipboard_text_html(self) -> tuple[str, str]:
         mime = QApplication.clipboard().mimeData()
         return QApplication.clipboard().text(), mime.html() if mime and mime.hasHtml() else ""
+
+    def _paste_target_month_from_focus(self) -> Optional[tuple[int, int]]:
+        """Return target year/month when Ctrl+V happens inside a roster table.
+
+        QTableWidget.keyPressEvent is not enough because Qt can route Ctrl+V to
+        the cell editor/viewport depending on the current focus state. Walking
+        up from the focused widget lets us intercept paste consistently.
+        """
+        widget = QApplication.focusWidget()
+        while widget is not None:
+            if isinstance(widget, MonthRosterTable):
+                return widget.year, widget.month
+            if isinstance(widget, CurrentMonthRosterTable):
+                return self.year_spin.value(), self.month_spin.value()
+            widget = widget.parentWidget()
+        return None
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.KeyPress and event.matches(QKeySequence.Paste):
+            target = self._paste_target_month_from_focus()
+            if target is not None:
+                year, month = target
+                self.paste_schedule_from_clipboard_for_month(year, month)
+                return True
+        return super().eventFilter(watched, event)
 
     def paste_schedule_from_clipboard_for_month(self, year: int, month: int) -> None:
         text, html = self._clipboard_text_html()
