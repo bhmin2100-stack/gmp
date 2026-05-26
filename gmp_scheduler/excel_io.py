@@ -172,6 +172,9 @@ def _hex_to_rgb(value: str) -> Optional[tuple[int, int, int]]:
     value = value.strip().strip('"\'')
     if not value:
         return None
+    embedded = re.search(r"#?([0-9a-fA-F]{6})", value)
+    if embedded:
+        value = embedded.group(1)
     if value.startswith("#"):
         value = value[1:]
     if len(value) == 3:
