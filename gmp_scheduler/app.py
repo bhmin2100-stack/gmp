@@ -208,10 +208,10 @@ class MainWindow(QMainWindow):
 
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2100)
-        self.year_spin.setValue(OVERVIEW_START_YEAR)
+        self.year_spin.setValue(date.today().year)
         self.month_spin = QSpinBox()
         self.month_spin.setRange(1, 12)
-        self.month_spin.setValue(1)
+        self.month_spin.setValue(date.today().month)
 
         self._build_rule_widgets()
 
@@ -258,14 +258,21 @@ class MainWindow(QMainWindow):
         if app:
             app.installEventFilter(self)
         self.employees = []
-        self.add_employee_rows([])
-        self.result = ScheduleResult(
-            self.year_spin.value(),
-            self.month_spin.value(),
-            self.employees,
-            {d: {} for d in month_dates(self.year_spin.value(), self.month_spin.value())},
-            korean_holidays(self.year_spin.value()),
-        )
+        current_year = self.year_spin.value()
+        current_month = self.month_spin.value()
+        loaded = load_schedule_result(current_year, current_month)
+        if loaded:
+            self.result = loaded
+            self.employees = list(loaded.employees)
+        else:
+            self.result = ScheduleResult(
+                current_year,
+                current_month,
+                self.employees,
+                {d: {} for d in month_dates(current_year, current_month)},
+                korean_holidays(current_year),
+            )
+        self.add_employee_rows(self.employees)
         self.render_schedule_table()
         self.render_year_overview()
 
@@ -319,7 +326,8 @@ class MainWindow(QMainWindow):
         root_layout.addLayout(top)
 
         splitter = QSplitter(Qt.Vertical)
-        tabs = QTabWidget()
+        self.tabs = QTabWidget()
+        tabs = self.tabs
 
         year_tab = QWidget()
         year_layout = QVBoxLayout(year_tab)
@@ -393,6 +401,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([650, 160])
         root_layout.addWidget(splitter)
         self.setCentralWidget(root)
+        self.tabs.setCurrentIndex(1)
 
     def add_employee_rows(self, employees: List[Employee]) -> None:
         self.employee_table.setRowCount(0)
@@ -537,8 +546,14 @@ class MainWindow(QMainWindow):
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
+        try:
+            save_schedule(self.result, f"{year}-{month:02d}")
+            save_unavailable_days(self.result.employees, f"{year}-{month:02d}")
+            self.render_cumulative_stats()
+        except Exception as exc:
+            QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
         self.render_year_overview()
-        QMessageBox.information(self, "근무표 반영", f"{year}년 {month}월 표에서 {len(self.employees)}명을 인식했습니다.")
+        QMessageBox.information(self, "근무표 반영", f"{year}년 {month}월 표에서 {len(self.employees)}명을 인식했고 DB에 자동 저장했습니다.")
 
     def paste_schedule_from_clipboard(self) -> None:
         self.paste_schedule_from_clipboard_for_month(self.year_spin.value(), self.month_spin.value())
@@ -990,17 +1005,34 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "기간 오류", "통계 시작 월이 종료 월보다 늦습니다.")
             return
         rows = cumulative_stats(start_year, start_month, end_year, end_month)
-        headers = ["성명", "사번", "D", "S", "G/지근", "당직", "지휴", "총근무"]
-        keys = ["name", "employee_no", "d_count", "s_count", "weekday_gy_count", "duty_count", "gy_rest_count", "total_work"]
+        headers = ["성명", "사번", "첫근무일", "대상일수", "D", "S", "G/지근", "당직", "지휴", "총근무", "근무율", "D율", "S율", "G율"]
+        keys = ["name", "employee_no", "first_work_date", "eligible_days", "d_count", "s_count", "weekday_gy_count", "duty_count", "gy_rest_count", "total_work"]
         self.cumulative_stats_table.clear()
         self.cumulative_stats_table.setColumnCount(len(headers))
         self.cumulative_stats_table.setHorizontalHeaderLabels(headers)
         self.cumulative_stats_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
-            for c, key in enumerate(keys):
-                self.cumulative_stats_table.setItem(r, c, QTableWidgetItem(str(row.get(key) or 0)))
+            eligible_days = int(row.get("eligible_days") or 0)
+            total_work = int(row.get("total_work") or 0)
+            d_count = int(row.get("d_count") or 0)
+            s_count = int(row.get("s_count") or 0)
+            gy_count = int(row.get("weekday_gy_count") or 0) + int(row.get("duty_count") or 0)
+            values = [row.get(key) or 0 for key in keys] + [
+                self._percent(total_work, eligible_days),
+                self._percent(d_count, eligible_days),
+                self._percent(s_count, eligible_days),
+                self._percent(gy_count, eligible_days),
+            ]
+            for c, value in enumerate(values):
+                self.cumulative_stats_table.setItem(r, c, QTableWidgetItem(str(value)))
         self.cumulative_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.cumulative_stats_table.verticalHeader().setVisible(False)
+
+    @staticmethod
+    def _percent(numerator: int, denominator: int) -> str:
+        if denominator <= 0:
+            return "0.0%"
+        return f"{numerator / denominator * 100:.1f}%"
 
     def render_warnings(self) -> None:
         if not self.result:

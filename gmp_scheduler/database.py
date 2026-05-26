@@ -148,21 +148,35 @@ def cumulative_stats(
     with connect() as conn:
         rows = conn.execute(
             f"""
+            WITH first_work AS (
+                SELECT employee_id, MIN(work_date) AS first_work_date
+                FROM assignments
+                WHERE shift_code IN (?, ?, ?, ?)
+                GROUP BY employee_id
+            )
             SELECT e.name, e.employee_no,
-                   SUM(CASE WHEN a.shift_code=? THEN 1 ELSE 0 END) AS d_count,
-                   SUM(CASE WHEN a.shift_code=? THEN 1 ELSE 0 END) AS s_count,
-                   SUM(CASE WHEN a.shift_code=? THEN 1 ELSE 0 END) AS weekday_gy_count,
-                   SUM(CASE WHEN a.shift_code=? THEN 1 ELSE 0 END) AS duty_count,
-                   SUM(CASE WHEN a.shift_code=? THEN 1 ELSE 0 END) AS gy_rest_count,
-                   SUM(CASE WHEN a.shift_code IN (?, ?, ?, ?) THEN 1 ELSE 0 END) AS total_work
+                   fw.first_work_date,
+                   SUM(CASE WHEN fw.first_work_date IS NOT NULL AND a.work_date >= fw.first_work_date THEN 1 ELSE 0 END) AS eligible_days,
+                   SUM(CASE WHEN a.work_date >= fw.first_work_date AND a.shift_code=? THEN 1 ELSE 0 END) AS d_count,
+                   SUM(CASE WHEN a.work_date >= fw.first_work_date AND a.shift_code=? THEN 1 ELSE 0 END) AS s_count,
+                   SUM(CASE WHEN a.work_date >= fw.first_work_date AND a.shift_code=? THEN 1 ELSE 0 END) AS weekday_gy_count,
+                   SUM(CASE WHEN a.work_date >= fw.first_work_date AND a.shift_code=? THEN 1 ELSE 0 END) AS duty_count,
+                   SUM(CASE WHEN a.work_date >= fw.first_work_date AND a.shift_code=? THEN 1 ELSE 0 END) AS gy_rest_count,
+                   SUM(CASE WHEN a.work_date >= fw.first_work_date AND a.shift_code IN (?, ?, ?, ?) THEN 1 ELSE 0 END) AS total_work
             FROM employees e
             LEFT JOIN assignments a ON a.employee_id = e.id
             LEFT JOIN monthly_schedules ms ON ms.id = a.schedule_id
+            LEFT JOIN first_work fw ON fw.employee_id = e.id
             WHERE 1=1 {range_clause}
             GROUP BY e.id
+            HAVING eligible_days > 0
             ORDER BY e.name, e.employee_no
             """,
             (
+                SHIFT_DAY,
+                SHIFT_SWING,
+                SHIFT_GY,
+                SHIFT_DUTY,
                 SHIFT_DAY,
                 SHIFT_SWING,
                 SHIFT_GY,
