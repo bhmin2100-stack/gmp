@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -95,6 +96,30 @@ class PasteTableWidget(QTableWidget):
                 self.setItem(row, col, QTableWidgetItem(value.strip()))
 
 
+class ShiftComboDelegate(QStyledItemDelegate):
+    """Dropdown editor for schedule cells."""
+
+    def createEditor(self, parent, option, index):  # type: ignore[override]
+        if index.column() < 2:
+            return None
+        editor = QComboBox(parent)
+        editor.addItems(SHIFT_OPTIONS)
+        return editor
+
+    def setEditorData(self, editor, index) -> None:  # type: ignore[override]
+        if not isinstance(editor, QComboBox):
+            return
+        value = normalize_shift_code(index.data() or "")
+        pos = editor.findText("" if value == OFF else value)
+        editor.setCurrentIndex(max(0, pos))
+
+    def setModelData(self, editor, model, index) -> None:  # type: ignore[override]
+        if not isinstance(editor, QComboBox):
+            return
+        value = normalize_shift_code(editor.currentText())
+        model.setData(index, "" if value == OFF else value)
+
+
 class MonthRosterTable(PasteTableWidget):
     """A month table in the yearly view that accepts Ctrl+V directly."""
 
@@ -129,17 +154,20 @@ class CurrentMonthRosterTable(PasteTableWidget):
     def __init__(self, owner: "MainWindow", *args, **kwargs) -> None:
         super().__init__(*args, allow_expand=False, **kwargs)
         self.owner = owner
-        self.setToolTip("어느 셀을 클릭해도 Ctrl+V는 엑셀 근무표 전체 붙여넣기로 처리됩니다.")
+        self.setToolTip("큰 표는 전체 붙여넣기, 근무 코드만 복사한 작은 범위는 선택 셀부터 붙여넣기 됩니다.")
         self.setFocusPolicy(Qt.StrongFocus)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.matches(QKeySequence.Copy):
+            self.owner.copy_schedule_selection_to_clipboard()
+            return
         if event.matches(QKeySequence.Paste):
-            self.owner.paste_schedule_from_clipboard()
+            self.owner.paste_current_month_clipboard()
             return
         super().keyPressEvent(event)
 
     def paste_text(self, text: str) -> None:
-        self.owner.paste_schedule_from_clipboard()
+        self.owner.paste_current_month_clipboard()
 
 
 class ScheduleInputTable(PasteTableWidget):
@@ -191,6 +219,7 @@ class MainWindow(QMainWindow):
         self.paste_box.setMaximumHeight(100)
 
         self.schedule_table = CurrentMonthRosterTable(self, 0, 0)
+        self.schedule_table.setItemDelegate(ShiftComboDelegate(self.schedule_table))
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
 
         self.month_stats_table = QTableWidget()
@@ -416,12 +445,43 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
         if event.type() == QEvent.KeyPress and event.matches(QKeySequence.Paste):
+            table = self._focus_ancestor(CurrentMonthRosterTable)
+            if table is not None:
+                self.paste_current_month_clipboard()
+                return True
             target = self._paste_target_month_from_focus()
             if target is not None:
                 year, month = target
                 self.paste_schedule_from_clipboard_for_month(year, month)
                 return True
         return super().eventFilter(watched, event)
+
+    def _focus_ancestor(self, cls):
+        widget = QApplication.focusWidget()
+        while widget is not None:
+            if isinstance(widget, cls):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
+    def _clipboard_matrix(self) -> List[List[str]]:
+        text = QApplication.clipboard().text()
+        return [[cell.strip() for cell in line.split("\t")] for line in text.rstrip("\n").splitlines()]
+
+    def clipboard_looks_like_full_roster(self) -> bool:
+        rows = [row for row in self._clipboard_matrix() if any(cell.strip() for cell in row)]
+        if not rows:
+            return False
+        lowered_first = [cell.replace(" ", "").lower() for cell in rows[0]]
+        if any(cell in ("성명", "이름", "name") for cell in lowered_first):
+            return True
+        max_cols = max(len(row) for row in rows)
+        first = rows[0][0].strip() if rows[0] else ""
+        if max_cols < 2 or normalize_shift_code(first) in SHIFT_OPTIONS:
+            return False
+        second = rows[0][1].strip() if len(rows[0]) > 1 else ""
+        # 이름+사번+표시들, 또는 이름+표시들 형태면 전체 근무표로 본다.
+        return max_cols >= 3 or normalize_shift_code(second) in SHIFT_OPTIONS
 
     def paste_schedule_from_clipboard_for_month(self, year: int, month: int) -> None:
         text, html = self._clipboard_text_html()
@@ -447,6 +507,58 @@ class MainWindow(QMainWindow):
 
     def paste_schedule_from_clipboard(self) -> None:
         self.paste_schedule_from_clipboard_for_month(self.year_spin.value(), self.month_spin.value())
+
+    def paste_current_month_clipboard(self) -> None:
+        if self.clipboard_looks_like_full_roster():
+            self.paste_schedule_from_clipboard()
+            return
+        self.paste_schedule_cells_from_clipboard()
+
+    def copy_schedule_selection_to_clipboard(self) -> None:
+        ranges = self.schedule_table.selectedRanges()
+        if not ranges:
+            item = self.schedule_table.currentItem()
+            QApplication.clipboard().setText(item.text() if item else "")
+            return
+        selected = ranges[0]
+        lines = []
+        for row in range(selected.topRow(), selected.bottomRow() + 1):
+            values = []
+            for col in range(selected.leftColumn(), selected.rightColumn() + 1):
+                item = self.schedule_table.item(row, col)
+                values.append(item.text() if item else "")
+            lines.append("\t".join(values))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def paste_schedule_cells_from_clipboard(self) -> None:
+        if not self.result:
+            return
+        matrix = self._clipboard_matrix()
+        if not matrix:
+            return
+        start_row = max(0, self.schedule_table.currentRow())
+        start_col = max(2, self.schedule_table.currentColumn())
+        self._updating_table = True
+        for r_offset, values in enumerate(matrix):
+            row = start_row + r_offset
+            if row >= self.schedule_table.rowCount():
+                continue
+            for c_offset, raw in enumerate(values):
+                col = start_col + c_offset
+                if col < 2 or col >= self.schedule_table.columnCount():
+                    continue
+                shift = normalize_shift_code(raw)
+                item = self.schedule_table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    self.schedule_table.setItem(row, col, item)
+                item.setText("" if shift == OFF else shift)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+        self._updating_table = False
+        self.sync_schedule_from_table()
+        self.render_schedule_table()
+        self.refresh_validation_and_stats()
 
     def paste_unavailable_from_clipboard(self) -> None:
         text, html = self._clipboard_text_html()
@@ -680,6 +792,7 @@ class MainWindow(QMainWindow):
             item.setText("" if normalized == OFF else normalized)
         item.setBackground(SHIFT_COLORS.get(normalized, QColor("#ffffff")))
         self.sync_schedule_from_table()
+        self.render_schedule_table()
         self.refresh_validation_and_stats()
 
     @staticmethod

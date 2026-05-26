@@ -201,6 +201,15 @@ def is_gray_rgb(rgb: Optional[tuple[int, int, int]]) -> bool:
     return max(r, g, b) - min(r, g, b) <= 22 and 65 <= (r + g + b) / 3 <= 240
 
 
+def is_blue_rgb(rgb: Optional[tuple[int, int, int]]) -> bool:
+    if rgb is None:
+        return False
+    r, g, b = rgb
+    # Excel's dark/medium blue fills vary by theme. Treat clearly blue cells as
+    # G/지근 continuation marks when they have no text.
+    return b >= 90 and b >= r + 35 and b >= g + 20
+
+
 def parse_html_table(html: str) -> List[List[dict]]:
     parser = _HTMLTableParser()
     parser.feed(html or "")
@@ -211,10 +220,23 @@ def _rows_to_text_matrix(rows: List[List[dict]]) -> List[List[str]]:
     return [[str(cell.get("text", "")).strip() for cell in row] for row in rows]
 
 
+def _rows_to_schedule_matrix(rows: List[List[dict]]) -> List[List[str]]:
+    matrix: List[List[str]] = []
+    for row in rows:
+        values: List[str] = []
+        for cell in row:
+            text = str(cell.get("text", "")).strip()
+            if not text and is_blue_rgb(_cell_color_from_html_cell(cell)):
+                text = SHIFT_GY
+            values.append(text)
+        matrix.append(values)
+    return matrix
+
+
 def parse_schedule_from_clipboard(text: str, html: str, year: int, month: int, rules: Optional[ShiftRules] = None) -> ScheduleResult:
     html_rows = parse_html_table(html)
     if html_rows:
-        tsv = "\n".join("\t".join(row) for row in _rows_to_text_matrix(html_rows))
+        tsv = "\n".join("\t".join(row) for row in _rows_to_schedule_matrix(html_rows))
         return parse_schedule_from_tsv(tsv, year, month, rules)
     return parse_schedule_from_tsv(text, year, month, rules)
 
