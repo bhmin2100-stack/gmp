@@ -449,6 +449,11 @@ class MainWindow(QMainWindow):
         return None
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.KeyPress and event.matches(QKeySequence.Copy):
+            table = self._focus_ancestor(CurrentMonthRosterTable)
+            if table is not None:
+                self.copy_schedule_selection_to_clipboard()
+                return True
         if event.type() == QEvent.KeyPress and event.matches(QKeySequence.Paste):
             table = self._focus_ancestor(CurrentMonthRosterTable)
             if table is not None:
@@ -471,6 +476,8 @@ class MainWindow(QMainWindow):
 
     def _clipboard_matrix(self) -> List[List[str]]:
         text = QApplication.clipboard().text()
+        if not text:
+            return []
         return [[cell.strip() for cell in line.split("\t")] for line in text.rstrip("\n").splitlines()]
 
     def clipboard_looks_like_full_roster(self) -> bool:
@@ -520,18 +527,28 @@ class MainWindow(QMainWindow):
         self.paste_schedule_cells_from_clipboard()
 
     def copy_schedule_selection_to_clipboard(self) -> None:
-        ranges = self.schedule_table.selectedRanges()
-        if not ranges:
+        indexes = [
+            index for index in self.schedule_table.selectedIndexes()
+            if index.row() >= 0 and index.column() >= 2
+        ]
+        if not indexes:
             item = self.schedule_table.currentItem()
             QApplication.clipboard().setText(item.text() if item else "")
             return
-        selected = ranges[0]
+        top = min(index.row() for index in indexes)
+        bottom = max(index.row() for index in indexes)
+        left = min(index.column() for index in indexes)
+        right = max(index.column() for index in indexes)
+        selected_cells = {(index.row(), index.column()) for index in indexes}
         lines = []
-        for row in range(selected.topRow(), selected.bottomRow() + 1):
+        for row in range(top, bottom + 1):
             values = []
-            for col in range(selected.leftColumn(), selected.rightColumn() + 1):
-                item = self.schedule_table.item(row, col)
-                values.append(item.text() if item else "")
+            for col in range(left, right + 1):
+                if (row, col) in selected_cells:
+                    item = self.schedule_table.item(row, col)
+                    values.append(item.text() if item else "")
+                else:
+                    values.append("")
             lines.append("\t".join(values))
         QApplication.clipboard().setText("\n".join(lines))
 
@@ -549,10 +566,15 @@ class MainWindow(QMainWindow):
             if row >= self.schedule_table.rowCount():
                 continue
             for c_offset, raw in enumerate(values):
+                # Preserve blank cells in copied ranges, but ignore whitespace-only
+                # fragments produced by some clipboard formats.
+                if raw == "" and len(values) == 1 and len(matrix) == 1:
+                    shift = OFF
+                else:
+                    shift = normalize_shift_code(raw)
                 col = start_col + c_offset
                 if col < 2 or col >= self.schedule_table.columnCount():
                     continue
-                shift = normalize_shift_code(raw)
                 item = self.schedule_table.item(row, col)
                 if item is None:
                     item = QTableWidgetItem()

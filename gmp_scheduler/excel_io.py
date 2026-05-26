@@ -231,7 +231,9 @@ def is_blue_rgb(rgb: Optional[tuple[int, int, int]]) -> bool:
     r, g, b = rgb
     # Excel's dark/medium blue fills vary by theme. Treat clearly blue cells as
     # G/지근 continuation marks when they have no text.
-    return b >= 90 and b >= r + 35 and b >= g + 20
+    if b < 70:
+        return False
+    return b >= r + 25 and b >= g + 10
 
 
 def parse_html_table(html: str) -> List[List[dict]]:
