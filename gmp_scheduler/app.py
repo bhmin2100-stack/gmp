@@ -58,6 +58,11 @@ WARNING_COLOR = QColor("#f4cccc")
 HOLIDAY_HEADER_COLOR = QColor("#f4cccc")
 STAFFING_OK_COLOR = QColor("#008000")
 OVERVIEW_START_YEAR = 2025
+NAME_COL_WIDTH = 74
+ID_COL_WIDTH = 58
+DAY_COL_WIDTH = 34
+COMPACT_ROW_HEIGHT = 20
+COMPACT_FONT_SIZE = 8
 
 
 class PasteTableWidget(QTableWidget):
@@ -683,6 +688,39 @@ class MainWindow(QMainWindow):
             elif child_layout is not None:
                 self._clear_layout(child_layout)  # type: ignore[arg-type]
 
+    def configure_roster_table_layout(self, table: QTableWidget, date_count: int, row_count: int, *, overview: bool = False) -> None:
+        """Make roster tables compact and avoid horizontal scrolling."""
+        table.setWordWrap(False)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff if overview else Qt.ScrollBarAsNeeded)
+        table.setAlternatingRowColors(False)
+        table.setShowGrid(True)
+
+        font = table.font()
+        font.setPointSize(COMPACT_FONT_SIZE)
+        table.setFont(font)
+
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Fixed)
+        header.setDefaultSectionSize(DAY_COL_WIDTH)
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(20)
+        header_font = header.font()
+        header_font.setPointSize(COMPACT_FONT_SIZE)
+        header.setFont(header_font)
+        header.setFixedHeight(32)
+
+        table.setColumnWidth(0, NAME_COL_WIDTH)
+        table.setColumnWidth(1, ID_COL_WIDTH)
+        for col in range(2, date_count + 2):
+            table.setColumnWidth(col, DAY_COL_WIDTH)
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, COMPACT_ROW_HEIGHT)
+
+        if overview:
+            table.setMinimumWidth(NAME_COL_WIDTH + ID_COL_WIDTH + date_count * DAY_COL_WIDTH + 8)
+            table.setFixedHeight(38 + max(1, row_count) * COMPACT_ROW_HEIGHT)
+
     def _make_schedule_view_table(self, result: ScheduleResult) -> QTableWidget:
         dates = month_dates(result.year, result.month)
         row_count = max(1, len(result.employees))
@@ -713,10 +751,7 @@ class MainWindow(QMainWindow):
                     cell.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
                     cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
                     table.setItem(row, col, cell)
-        for row in range(table.rowCount()):
-            table.setRowHeight(row, 24)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.setMinimumHeight(min(520, 72 + row_count * 28))
+        self.configure_roster_table_layout(table, len(dates), row_count, overview=True)
         return table
 
     def render_year_overview(self) -> None:
@@ -775,8 +810,8 @@ class MainWindow(QMainWindow):
                 item.setTextAlignment(Qt.AlignCenter)
                 item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
                 self.schedule_table.setItem(row, col, item)
-        self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.schedule_table.verticalHeader().setVisible(False)
+        self.configure_roster_table_layout(self.schedule_table, len(dates), len(self.result.employees), overview=False)
         self.schedule_table.freezeColumnCount if hasattr(self.schedule_table, "freezeColumnCount") else None
         self._updating_table = False
 
