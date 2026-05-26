@@ -261,12 +261,12 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
     if not rows:
         raise ValueError("붙여넣은 표가 비어 있습니다.")
 
-    header_index = 0
+    header_index: Optional[int] = None
     name_col = 0
     id_col = 1
     day_cols: Dict[int, int] = {}
 
-    for idx, row in enumerate(rows[:5]):
+    for idx, row in enumerate(rows[:8]):
         lowered = [c.replace(" ", "").lower() for c in row]
         if any(c in ("성명", "이름", "name") for c in lowered):
             header_index = idx
@@ -277,15 +277,20 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
                     id_col = col
             break
 
-    header = rows[header_index]
     valid_dates = {d.day: d for d in month_dates(year, month)}
-    for col, cell in enumerate(header):
-        day = _header_day(cell)
-        if day in valid_dates:
-            day_cols[day] = col
+
+    if header_index is not None:
+        header = rows[header_index]
+        for col, cell in enumerate(header):
+            day = _header_day(cell)
+            if day in valid_dates and col not in (name_col, id_col):
+                day_cols[day] = col
 
     if not day_cols:
-        # Header might be omitted; assume columns after 성명/사번 are 1..말일.
+        # Header might be omitted because the user clicked below "성명" and
+        # copied only data rows. In that case do NOT inspect the first employee
+        # row for day numbers: numeric employee IDs such as "21..." would be
+        # misread as the 21st day and 사번 would appear under 21일.
         for offset, d in enumerate(month_dates(year, month), start=2):
             day_cols[d.day] = offset
 
@@ -294,7 +299,8 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
     schedule: ScheduleMap = {d: {} for d in month_dates(year, month)}
     seen_keys: Dict[str, int] = {}
 
-    for row in rows[header_index + 1:]:
+    data_start = (header_index + 1) if header_index is not None else 0
+    for row in rows[data_start:]:
         if name_col >= len(row) or not row[name_col].strip():
             continue
         name = row[name_col].strip()
