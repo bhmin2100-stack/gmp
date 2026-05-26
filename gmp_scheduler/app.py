@@ -225,6 +225,14 @@ class MainWindow(QMainWindow):
 
         self.schedule_table = CurrentMonthRosterTable(self, 0, 0)
         self.schedule_table.setItemDelegate(ShiftComboDelegate(self.schedule_table))
+        self.schedule_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.schedule_table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.schedule_table.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.AnyKeyPressed
+        )
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
 
         self.month_stats_table = QTableWidget()
@@ -452,7 +460,11 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.KeyPress and event.matches(QKeySequence.Copy):
             table = self._focus_ancestor(CurrentMonthRosterTable)
             if table is not None:
-                self.copy_schedule_selection_to_clipboard()
+                self.copy_table_selection_to_clipboard(table, skip_columns=2)
+                return True
+            table = self._focus_ancestor(MonthRosterTable)
+            if table is not None:
+                self.copy_table_selection_to_clipboard(table, skip_columns=2)
                 return True
         if event.type() == QEvent.KeyPress and event.matches(QKeySequence.Paste):
             table = self._focus_ancestor(CurrentMonthRosterTable)
@@ -527,12 +539,15 @@ class MainWindow(QMainWindow):
         self.paste_schedule_cells_from_clipboard()
 
     def copy_schedule_selection_to_clipboard(self) -> None:
+        self.copy_table_selection_to_clipboard(self.schedule_table, skip_columns=2)
+
+    def copy_table_selection_to_clipboard(self, table: QTableWidget, skip_columns: int = 0) -> None:
         indexes = [
-            index for index in self.schedule_table.selectedIndexes()
-            if index.row() >= 0 and index.column() >= 2
+            index for index in table.selectedIndexes()
+            if index.row() >= 0 and index.column() >= skip_columns
         ]
         if not indexes:
-            item = self.schedule_table.currentItem()
+            item = table.currentItem()
             QApplication.clipboard().setText(item.text() if item else "")
             return
         top = min(index.row() for index in indexes)
@@ -545,7 +560,7 @@ class MainWindow(QMainWindow):
             values = []
             for col in range(left, right + 1):
                 if (row, col) in selected_cells:
-                    item = self.schedule_table.item(row, col)
+                    item = table.item(row, col)
                     values.append(item.text() if item else "")
                 else:
                     values.append("")
@@ -831,6 +846,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
                 item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                 self.schedule_table.setItem(row, col, item)
         self.schedule_table.verticalHeader().setVisible(False)
         self.configure_roster_table_layout(self.schedule_table, len(dates), len(self.result.employees), overview=False)
