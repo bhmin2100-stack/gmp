@@ -129,10 +129,25 @@ def save_unavailable_days(employees: List[Employee], source_name: str = "") -> i
     return count
 
 
-def cumulative_stats() -> List[Dict[str, object]]:
+def cumulative_stats(
+    start_year: Optional[int] = None,
+    start_month: Optional[int] = None,
+    end_year: Optional[int] = None,
+    end_month: Optional[int] = None,
+) -> List[Dict[str, object]]:
+    start_key = start_year * 100 + start_month if start_year and start_month else None
+    end_key = end_year * 100 + end_month if end_year and end_month else None
+    range_clause = ""
+    params: List[object] = []
+    if start_key is not None:
+        range_clause += " AND (ms.year * 100 + ms.month) >= ?"
+        params.append(start_key)
+    if end_key is not None:
+        range_clause += " AND (ms.year * 100 + ms.month) <= ?"
+        params.append(end_key)
     with connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT e.name, e.employee_no,
                    SUM(CASE WHEN a.shift_code=? THEN 1 ELSE 0 END) AS d_count,
                    SUM(CASE WHEN a.shift_code=? THEN 1 ELSE 0 END) AS s_count,
@@ -142,6 +157,8 @@ def cumulative_stats() -> List[Dict[str, object]]:
                    SUM(CASE WHEN a.shift_code IN (?, ?, ?, ?) THEN 1 ELSE 0 END) AS total_work
             FROM employees e
             LEFT JOIN assignments a ON a.employee_id = e.id
+            LEFT JOIN monthly_schedules ms ON ms.id = a.schedule_id
+            WHERE 1=1 {range_clause}
             GROUP BY e.id
             ORDER BY e.name, e.employee_no
             """,
@@ -155,6 +172,7 @@ def cumulative_stats() -> List[Dict[str, object]]:
                 SHIFT_SWING,
                 SHIFT_GY,
                 SHIFT_DUTY,
+                *params,
             ),
         ).fetchall()
         return [dict(row) for row in rows]
