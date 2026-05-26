@@ -79,6 +79,14 @@ def normalize_shift_code(value: object, work_date: Optional[date] = None, holida
     return text
 
 
+def _looks_like_shift_code(value: object) -> bool:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return True
+    normalized = normalize_shift_code(text)
+    return normalized in {OFF, SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY, SHIFT_GY_REST}
+
+
 def _header_day(value: object) -> Optional[int]:
     if value is None:
         return None
@@ -291,7 +299,11 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
         # copied only data rows. In that case do NOT inspect the first employee
         # row for day numbers: numeric employee IDs such as "21..." would be
         # misread as the 21st day and 사번 would appear under 21일.
-        for offset, d in enumerate(month_dates(year, month), start=2):
+        first_data_row = next((row for row in rows if row and row[0].strip()), [])
+        has_employee_id_column = len(first_data_row) >= 2 and not _looks_like_shift_code(first_data_row[1])
+        id_col = 1 if has_employee_id_column else -1
+        first_day_col = 2 if has_employee_id_column else 1
+        for offset, d in enumerate(month_dates(year, month), start=first_day_col):
             day_cols[d.day] = offset
 
     holidays = korean_holidays(year)
@@ -304,7 +316,7 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
         if name_col >= len(row) or not row[name_col].strip():
             continue
         name = row[name_col].strip()
-        employee_id = row[id_col].strip() if id_col < len(row) else ""
+        employee_id = row[id_col].strip() if id_col >= 0 and id_col < len(row) else ""
         base_key = f"{name}|{employee_id}"
         seen_keys[base_key] = seen_keys.get(base_key, 0) + 1
         if seen_keys[base_key] > 1:
