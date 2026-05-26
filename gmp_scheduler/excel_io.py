@@ -114,29 +114,43 @@ class _HTMLTableParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.rows: List[List[dict]] = []
+        self.class_styles: Dict[str, str] = {}
         self._current_row: Optional[List[dict]] = None
         self._current_cell: Optional[dict] = None
         self._capture = False
+        self._capture_style = False
+        self._style_text = ""
 
     def handle_starttag(self, tag: str, attrs) -> None:
         attrs_dict = {k.lower(): (v or "") for k, v in attrs}
-        if tag.lower() == "tr":
+        tag = tag.lower()
+        if tag == "style":
+            self._capture_style = True
+            self._style_text = ""
+        elif tag == "tr":
             self._current_row = []
-        elif tag.lower() in ("td", "th") and self._current_row is not None:
+        elif tag in ("td", "th") and self._current_row is not None:
             self._current_cell = {
                 "text": "",
                 "style": attrs_dict.get("style", ""),
                 "bgcolor": attrs_dict.get("bgcolor", ""),
+                "class": attrs_dict.get("class", ""),
             }
             self._capture = True
 
     def handle_data(self, data: str) -> None:
-        if self._capture and self._current_cell is not None:
+        if self._capture_style:
+            self._style_text += data
+        elif self._capture and self._current_cell is not None:
             self._current_cell["text"] += data
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        if tag in ("td", "th") and self._current_row is not None and self._current_cell is not None:
+        if tag == "style":
+            self._capture_style = False
+            self.class_styles.update(_parse_css_class_styles(self._style_text))
+            self._style_text = ""
+        elif tag in ("td", "th") and self._current_row is not None and self._current_cell is not None:
             self._current_cell["text"] = " ".join(self._current_cell["text"].split())
             self._current_row.append(self._current_cell)
             self._current_cell = None
@@ -145,6 +159,13 @@ class _HTMLTableParser(HTMLParser):
             if self._current_row:
                 self.rows.append(self._current_row)
             self._current_row = None
+
+
+def _parse_css_class_styles(css: str) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for match in re.finditer(r"\.([A-Za-z0-9_-]+)\s*\{([^}]*)\}", css or "", flags=re.S):
+        result[match.group(1)] = " ".join(match.group(2).split())
+    return result
 
 
 def _hex_to_rgb(value: str) -> Optional[tuple[int, int, int]]:
@@ -172,6 +193,9 @@ def _css_rgb_to_tuple(value: str) -> Optional[tuple[int, int, int]]:
 
 def _cell_color_from_html_cell(cell: dict) -> Optional[tuple[int, int, int]]:
     style = cell.get("style", "") or ""
+    class_style = cell.get("class_style", "") or ""
+    if class_style:
+        style = f"{class_style};{style}"
     bgcolor = cell.get("bgcolor", "") or ""
     if bgcolor:
         rgb = _hex_to_rgb(bgcolor)
@@ -213,6 +237,13 @@ def is_blue_rgb(rgb: Optional[tuple[int, int, int]]) -> bool:
 def parse_html_table(html: str) -> List[List[dict]]:
     parser = _HTMLTableParser()
     parser.feed(html or "")
+    if parser.class_styles:
+        for row in parser.rows:
+            for cell in row:
+                class_names = str(cell.get("class", "")).split()
+                styles = [parser.class_styles[name] for name in class_names if name in parser.class_styles]
+                if styles:
+                    cell["class_style"] = ";".join(styles)
     return parser.rows
 
 
