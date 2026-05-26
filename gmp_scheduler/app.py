@@ -56,6 +56,7 @@ SHIFT_COLORS = {
 WARNING_COLOR = QColor("#f4cccc")
 HOLIDAY_HEADER_COLOR = QColor("#f4cccc")
 STAFFING_OK_COLOR = QColor("#008000")
+OVERVIEW_START_YEAR = 2025
 
 
 class PasteTableWidget(QTableWidget):
@@ -174,7 +175,7 @@ class MainWindow(QMainWindow):
 
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2100)
-        self.year_spin.setValue(2025)
+        self.year_spin.setValue(OVERVIEW_START_YEAR)
         self.month_spin = QSpinBox()
         self.month_spin.setRange(1, 12)
         self.month_spin.setValue(1)
@@ -274,7 +275,7 @@ class MainWindow(QMainWindow):
 
         year_tab = QWidget()
         year_layout = QVBoxLayout(year_tab)
-        year_layout.addWidget(QLabel("연도 전체 근무표입니다. 각 월 표를 클릭하고 Ctrl+V 하면 그 월에 엑셀 근무표가 바로 붙습니다. 마우스 휠로 1월~12월을 내려보세요."))
+        year_layout.addWidget(QLabel("2025년 1월부터 현재/선택 연도까지의 근무표입니다. 각 월 표를 클릭하고 Ctrl+V 하면 그 월에 엑셀 근무표가 바로 붙습니다. 마우스 휠로 계속 내려보세요."))
         self.year_scroll = QScrollArea()
         self.year_scroll.setWidgetResizable(True)
         self.year_scroll_content = QWidget()
@@ -610,24 +611,28 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "year_scroll_layout"):
             return
         self._clear_layout(self.year_scroll_layout)
-        year = self.year_spin.value()
-        for month in range(1, 13):
-            loaded = load_schedule_result(year, month)
-            if self.result and self.result.year == year and self.result.month == month:
-                result = self.result
-                status = "현재 편집 중"
-            elif loaded:
-                result = loaded
-                status = "DB 저장됨"
-            else:
-                employees = []
-                schedule = {d: {} for d in month_dates(year, month)}
-                result = ScheduleResult(year, month, employees, schedule, korean_holidays(year))
-                status = "미저장"
-            title = QLabel(f"{year}년 {month}월 · {status}")
-            title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
-            self.year_scroll_layout.addWidget(title)
-            self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
+        end_year = max(date.today().year, self.year_spin.value(), OVERVIEW_START_YEAR)
+        for year in range(OVERVIEW_START_YEAR, end_year + 1):
+            year_title = QLabel(f"{year}년")
+            year_title.setStyleSheet("font-size: 20px; font-weight: 800; margin-top: 20px;")
+            self.year_scroll_layout.addWidget(year_title)
+            for month in range(1, 13):
+                loaded = load_schedule_result(year, month)
+                if self.result and self.result.year == year and self.result.month == month:
+                    result = self.result
+                    status = "현재 편집 중"
+                elif loaded:
+                    result = loaded
+                    status = "DB 저장됨"
+                else:
+                    employees = []
+                    schedule = {d: {} for d in month_dates(year, month)}
+                    result = ScheduleResult(year, month, employees, schedule, korean_holidays(year))
+                    status = "미저장"
+                title = QLabel(f"{year}년 {month}월 · {status}")
+                title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
+                self.year_scroll_layout.addWidget(title)
+                self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
         self.year_scroll_layout.addStretch(1)
 
     def render_schedule_table(self) -> None:
