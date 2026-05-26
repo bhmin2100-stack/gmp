@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult
+from .schedule_utils import expand_gy_blocks
 from .stats import STAT_HEADERS, averages, compute_stats
 from .validation import validate_schedule
 from .models import ShiftRules
@@ -334,6 +335,7 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
     if not employees:
         raise ValueError("표에서 직원 행을 찾지 못했습니다.")
 
+    expand_gy_blocks(employees, year, month, schedule)
     result = ScheduleResult(year=year, month=month, employees=employees, schedule=schedule, holidays=holidays)
     result.warnings = validate_schedule(employees, year, month, schedule, holidays, rules or ShiftRules())
     return result

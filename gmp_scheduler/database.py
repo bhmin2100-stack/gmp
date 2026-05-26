@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Set
 
 from .calendar_utils import is_holiday_or_weekend, month_dates
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult
+from .schedule_utils import expand_gy_blocks
 from .stats import EmployeeStats, compute_stats
 
 DB_PATH = Path("gmp_scheduler.sqlite3")
@@ -212,4 +213,5 @@ def load_schedule_result(year: int, month: int) -> Optional[ScheduleResult]:
             emp_key = f"{row['name']}|{row['employee_no'] or ''}"
             if d in schedule:
                 schedule[d][emp_key] = str(row["shift_code"] or OFF)
+        expand_gy_blocks(employees, year, month, schedule)
         return ScheduleResult(year, month, employees, schedule, korean_holidays(year))

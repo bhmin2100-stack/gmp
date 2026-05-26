@@ -27,8 +27,11 @@ def validate_schedule(
         )
         min_rules = rules.min_holiday if is_holiday_or_weekend(d, holidays) else rules.min_weekday
         for shift, minimum in min_rules.items():
-            if counts[shift] < minimum:
-                warnings.append(f"{d.isoformat()} {shift} 최소 인원 부족: {counts[shift]}/{minimum}")
+            actual = counts[shift]
+            if shift == SHIFT_DUTY:
+                actual += counts[SHIFT_GY]
+            if actual < minimum:
+                warnings.append(f"{d.isoformat()} {shift} 최소 인원 부족: {actual}/{minimum}")
 
         for emp_key, shift in schedule.get(d, {}).items():
             emp = employee_by_key.get(emp_key)
@@ -38,8 +41,6 @@ def validate_schedule(
                 warnings.append(f"{d.isoformat()} {emp.name} 불가일 배정 위반: {shift}")
             if shift == SHIFT_DUTY and not is_holiday_or_weekend(d, holidays):
                 warnings.append(f"{d.isoformat()} {emp.name} 당직은 휴일/주말 GY인데 평일에 배정됨")
-            if shift == SHIFT_GY and is_holiday_or_weekend(d, holidays):
-                warnings.append(f"{d.isoformat()} {emp.name} 휴일 GY는 G/지근 대신 당직 표기 권장")
 
     stats = compute_stats(employees, month_dates(year, month), schedule, holidays)
     for s in stats.values():

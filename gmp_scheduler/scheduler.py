@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates
 from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ScheduleResult, ShiftRules
+from .schedule_utils import expand_gy_blocks
 from .validation import validate_schedule
 
 
@@ -96,11 +97,6 @@ def generate_month_schedule(
         score += rng.random()
         return score, rng.random()
 
-    def reserve_gy_rest(emp: Employee, d: date) -> None:
-        next_day = d + timedelta(days=1)
-        if next_day in schedule and schedule[next_day].get(emp.key, OFF) == OFF:
-            schedule[next_day][emp.key] = SHIFT_GY_REST
-
     def assign_one(d: date, shift: str) -> bool:
         candidates = [
             e for e in employees
@@ -116,8 +112,6 @@ def generate_month_schedule(
         counts[chosen.key]["total"] += 1
         if is_holiday_or_weekend(d, holidays):
             counts[chosen.key]["holiday_work"] += 1
-        if shift in (SHIFT_GY, SHIFT_DUTY):
-            reserve_gy_rest(chosen, d)
         return True
 
     for d in dates:
@@ -128,6 +122,7 @@ def generate_month_schedule(
             for _ in range(min_rules.get(shift, 0)):
                 assign_one(d, shift)
 
+    expand_gy_blocks(employees, year, month, schedule)
     result = ScheduleResult(year=year, month=month, employees=employees, schedule=schedule, holidays=holidays)
     result.warnings = validate_schedule(employees, year, month, schedule, holidays, rules)
     return result

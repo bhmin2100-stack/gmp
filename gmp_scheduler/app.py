@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -37,6 +38,7 @@ from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates,
 from .database import cumulative_stats, load_schedule_result, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
+from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
 from .validation import validate_schedule
@@ -53,6 +55,7 @@ SHIFT_COLORS = {
 }
 WARNING_COLOR = QColor("#f4cccc")
 HOLIDAY_HEADER_COLOR = QColor("#f4cccc")
+STAFFING_OK_COLOR = QColor("#008000")
 
 
 class PasteTableWidget(QTableWidget):
@@ -171,10 +174,10 @@ class MainWindow(QMainWindow):
 
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2100)
-        self.year_spin.setValue(date.today().year)
+        self.year_spin.setValue(2025)
         self.month_spin = QSpinBox()
         self.month_spin.setRange(1, 12)
-        self.month_spin.setValue(date.today().month)
+        self.month_spin.setValue(1)
 
         self._build_rule_widgets()
 
@@ -577,6 +580,7 @@ class MainWindow(QMainWindow):
             item = table.horizontalHeaderItem(col)
             if item and is_holiday_or_weekend(d, result.holidays):
                 item.setBackground(HOLIDAY_HEADER_COLOR)
+            self.apply_staffing_header_style(table, result, col, d)
         if not result.employees:
             hint = QTableWidgetItem("여기에 클릭 후 Ctrl+V")
             hint.setTextAlignment(Qt.AlignCenter)
@@ -639,6 +643,7 @@ class MainWindow(QMainWindow):
         for col, d in enumerate(dates, start=2):
             if is_holiday_or_weekend(d, self.result.holidays):
                 self.schedule_table.horizontalHeaderItem(col).setBackground(HOLIDAY_HEADER_COLOR)
+            self.apply_staffing_header_style(self.schedule_table, self.result, col, d)
         for row, emp in enumerate(self.result.employees):
             name_item = QTableWidgetItem(emp.name)
             id_item = QTableWidgetItem(emp.employee_id)
@@ -685,6 +690,42 @@ class MainWindow(QMainWindow):
                 item = self.schedule_table.item(row, col)
                 shift = self.normalize_shift(item.text() if item else "")
                 self.result.schedule[d][emp.key] = shift
+        expand_gy_blocks(self.result.employees, self.result.year, self.result.month, self.result.schedule)
+
+    def apply_staffing_header_style(self, table: QTableWidget, result: ScheduleResult, col: int, d: date) -> None:
+        item = table.horizontalHeaderItem(col)
+        if not item:
+            return
+        counts = Counter(
+            shift for shift in result.schedule.get(d, {}).values()
+            if shift and shift not in (OFF, SHIFT_GY_REST)
+        )
+        min_rules = self.rules.min_holiday if is_holiday_or_weekend(d, result.holidays) else self.rules.min_weekday
+        is_holiday = is_holiday_or_weekend(d, result.holidays)
+        required = [SHIFT_DAY, SHIFT_SWING, SHIFT_DUTY if is_holiday else SHIFT_GY]
+
+        def actual_count(shift: str) -> int:
+            if shift == SHIFT_DUTY:
+                return counts[SHIFT_DUTY] + counts[SHIFT_GY]
+            return counts[shift]
+
+        if all(actual_count(shift) >= max(1, min_rules.get(shift, 1)) for shift in required):
+            item.setForeground(STAFFING_OK_COLOR)
+            font = item.font()
+            font.setItalic(any(actual_count(shift) > max(1, min_rules.get(shift, 1)) for shift in required))
+            item.setFont(font)
+        else:
+            item.setForeground(QColor("#000000"))
+            font = item.font()
+            font.setItalic(False)
+            item.setFont(font)
+
+    def refresh_schedule_header_styles(self) -> None:
+        if not self.result:
+            return
+        dates = month_dates(self.result.year, self.result.month)
+        for col, d in enumerate(dates, start=2):
+            self.apply_staffing_header_style(self.schedule_table, self.result, col, d)
 
     def refresh_validation_and_stats(self) -> None:
         self.sync_rules_from_widgets()
@@ -700,6 +741,7 @@ class MainWindow(QMainWindow):
         )
         self.render_stats()
         self.render_warnings()
+        self.refresh_schedule_header_styles()
         self.paint_validation_errors()
 
     def render_stats(self) -> None:
