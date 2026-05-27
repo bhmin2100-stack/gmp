@@ -6,8 +6,8 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates
-from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ScheduleResult, ShiftRules
-from .schedule_utils import expand_gy_blocks
+from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
+from .schedule_utils import GY_BLOCK_DAYS
 from .validation import validate_schedule
 
 
@@ -97,6 +97,14 @@ def generate_month_schedule(
         score += rng.random()
         return score, rng.random()
 
+    def mark_assignment(emp: Employee, d: date, shift: str) -> None:
+        schedule[d][emp.key] = shift
+        counts[emp.key][shift] += 1
+        counts[emp.key][bucket(d, shift)] += 1
+        counts[emp.key]["total"] += 1
+        if is_holiday_or_weekend(d, holidays):
+            counts[emp.key]["holiday_work"] += 1
+
     def assign_one(d: date, shift: str) -> bool:
         candidates = [
             e for e in employees
@@ -106,23 +114,52 @@ def generate_month_schedule(
             return False
         candidates.sort(key=lambda e: candidate_score(e, d, shift))
         chosen = candidates[0]
-        schedule[d][chosen.key] = shift
-        counts[chosen.key][shift] += 1
-        counts[chosen.key][bucket(d, shift)] += 1
-        counts[chosen.key]["total"] += 1
-        if is_holiday_or_weekend(d, holidays):
-            counts[chosen.key]["holiday_work"] += 1
+        mark_assignment(chosen, d, shift)
+        return True
+
+    def has_gy_coverage(d: date) -> bool:
+        return any(
+            shift in (SHIFT_GY, SHIFT_DUTY)
+            for shift in schedule.get(d, {}).values()
+        )
+
+    def can_start_gy_block(emp: Employee, start: date) -> bool:
+        for offset in range(GY_BLOCK_DAYS):
+            d = start + timedelta(days=offset)
+            if d not in schedule:
+                continue
+            if d in emp.unavailable_dates:
+                return False
+            if schedule[d].get(emp.key, OFF) != OFF:
+                return False
+        return True
+
+    def assign_gy_block_start(d: date) -> bool:
+        candidates = [e for e in employees if can_start_gy_block(e, d)]
+        if not candidates:
+            return False
+        candidates.sort(key=lambda e: candidate_score(e, d, SHIFT_GY))
+        chosen = candidates[0]
+        for offset in range(GY_BLOCK_DAYS):
+            cur = d + timedelta(days=offset)
+            if cur not in schedule:
+                continue
+            mark_assignment(chosen, cur, SHIFT_GY)
         return True
 
     for d in dates:
         min_rules = rules.min_holiday if is_holiday_or_weekend(d, holidays) else rules.min_weekday
-        shift_order = list(min_rules.keys())
-        rng.shuffle(shift_order)
-        for shift in shift_order:
+        if not has_gy_coverage(d):
+            assign_gy_block_start(d)
+        day_swing_order = [shift for shift in (SHIFT_DAY, SHIFT_SWING) if shift in min_rules]
+        for shift in day_swing_order:
             for _ in range(min_rules.get(shift, 0)):
                 assign_one(d, shift)
+        if not has_gy_coverage(d):
+            gy_shift = SHIFT_DUTY if SHIFT_DUTY in min_rules else SHIFT_GY
+            for _ in range(min_rules.get(gy_shift, 1)):
+                assign_one(d, gy_shift)
 
-    expand_gy_blocks(employees, year, month, schedule)
     result = ScheduleResult(year=year, month=month, employees=employees, schedule=schedule, holidays=holidays)
     result.warnings = validate_schedule(employees, year, month, schedule, holidays, rules)
     return result

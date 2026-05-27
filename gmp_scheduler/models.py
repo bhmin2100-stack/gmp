@@ -42,7 +42,7 @@ class ShiftRules:
         SHIFT_DUTY: 1,
     })
     max_consecutive_work_days: int = 5
-    max_consecutive_gy: int = 2
+    max_consecutive_gy: int = 6
     allow_same_day_multiple_shift: bool = False
 
 
