@@ -7,13 +7,14 @@ from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QDate, QEvent, Qt
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -36,8 +37,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
-from .database import cumulative_stats, load_schedule_result, save_schedule, save_unavailable_days, saved_months
+from .calendar_settings import add_custom_family_day, add_custom_holiday, remove_family_day, remove_holiday
+from .calendar_utils import family_days, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
+from .database import load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .schedule_utils import expand_gy_blocks
@@ -253,6 +255,12 @@ class MainWindow(QMainWindow):
         self.stats_end_month_spin = QSpinBox()
         self.stats_end_month_spin.setRange(1, 12)
         self.stats_end_month_spin.setValue(date.today().month)
+        self.stats_mode_combo = QComboBox()
+        self.stats_mode_combo.addItems(["근무율", "GY/당직", "저장 월"])
+        self.calendar_date_edit = QDateEdit()
+        self.calendar_date_edit.setCalendarPopup(True)
+        today = date.today()
+        self.calendar_date_edit.setDate(QDate(today.year, today.month, today.day))
 
         self._build_ui()
         app = QApplication.instance()
@@ -292,6 +300,33 @@ class MainWindow(QMainWindow):
         self.holiday_gy_spin = spin(self.rules.min_holiday.get(SHIFT_DUTY, 1))
         self.max_consecutive_spin = spin(self.rules.max_consecutive_work_days, 1)
         self.max_consecutive_gy_spin = spin(self.rules.max_consecutive_gy, 1)
+
+    def selected_calendar_date(self) -> date:
+        qdate = self.calendar_date_edit.date()
+        return date(qdate.year(), qdate.month(), qdate.day())
+
+    def refresh_calendar_after_override(self) -> None:
+        if self.result:
+            self.result.holidays = korean_holidays(self.result.year)
+            self.render_schedule_table()
+            self.refresh_validation_and_stats()
+        self.render_year_overview()
+
+    def add_selected_holiday(self) -> None:
+        add_custom_holiday(self.selected_calendar_date())
+        self.refresh_calendar_after_override()
+
+    def remove_selected_holiday(self) -> None:
+        remove_holiday(self.selected_calendar_date())
+        self.refresh_calendar_after_override()
+
+    def add_selected_family_day(self) -> None:
+        add_custom_family_day(self.selected_calendar_date())
+        self.refresh_calendar_after_override()
+
+    def remove_selected_family_day(self) -> None:
+        remove_family_day(self.selected_calendar_date())
+        self.refresh_calendar_after_override()
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("main")
@@ -336,6 +371,23 @@ class MainWindow(QMainWindow):
         year_tab = QWidget()
         year_layout = QVBoxLayout(year_tab)
         year_layout.addWidget(QLabel("2025년 1월부터 현재/선택 연도까지의 근무표입니다. 각 월 표를 클릭하고 Ctrl+V 하면 그 월에 엑셀 근무표가 바로 붙습니다. 마우스 휠로 계속 내려보세요."))
+        calendar_edit_layout = QHBoxLayout()
+        calendar_edit_layout.addWidget(QLabel("휴일/페밀리데이 편집"))
+        calendar_edit_layout.addWidget(self.calendar_date_edit)
+        add_holiday_btn = QPushButton("공휴일 추가")
+        add_holiday_btn.clicked.connect(self.add_selected_holiday)
+        remove_holiday_btn = QPushButton("공휴일 제외")
+        remove_holiday_btn.clicked.connect(self.remove_selected_holiday)
+        add_family_btn = QPushButton("페밀리데이 추가")
+        add_family_btn.clicked.connect(self.add_selected_family_day)
+        remove_family_btn = QPushButton("페밀리데이 제외")
+        remove_family_btn.clicked.connect(self.remove_selected_family_day)
+        calendar_edit_layout.addWidget(add_holiday_btn)
+        calendar_edit_layout.addWidget(remove_holiday_btn)
+        calendar_edit_layout.addWidget(add_family_btn)
+        calendar_edit_layout.addWidget(remove_family_btn)
+        calendar_edit_layout.addStretch(1)
+        year_layout.addLayout(calendar_edit_layout)
         self.year_scroll = QScrollArea()
         self.year_scroll.setWidgetResizable(True)
         self.year_scroll_content = QWidget()
@@ -355,6 +407,8 @@ class MainWindow(QMainWindow):
         stats_layout.addWidget(QLabel("월간 통계"))
         stats_layout.addWidget(self.month_stats_table)
         period_layout = QHBoxLayout()
+        period_layout.addWidget(QLabel("통계"))
+        period_layout.addWidget(self.stats_mode_combo)
         period_layout.addWidget(QLabel("기간"))
         period_layout.addWidget(self.stats_start_year_spin)
         period_layout.addWidget(QLabel("년"))
@@ -1065,29 +1119,119 @@ class MainWindow(QMainWindow):
         if start_year * 100 + start_month > end_year * 100 + end_month:
             QMessageBox.warning(self, "기간 오류", "통계 시작 월이 종료 월보다 늦습니다.")
             return
-        rows = cumulative_stats(start_year, start_month, end_year, end_month)
-        headers = ["성명", "사번", "첫근무일", "대상일수", "D", "S", "G/지근", "당직", "지휴", "총근무", "근무율", "D율", "S율", "G율"]
-        keys = ["name", "employee_no", "first_work_date", "eligible_days", "d_count", "s_count", "weekday_gy_count", "duty_count", "gy_rest_count", "total_work"]
+        if self.stats_mode_combo.currentText() == "저장 월":
+            self.render_saved_months_as_main_stat(month_rows)
+        else:
+            self.render_period_shift_stats(start_year, start_month, end_year, end_month)
+        self.cumulative_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.cumulative_stats_table.verticalHeader().setVisible(False)
+        self.cumulative_stats_table.verticalHeader().setDefaultSectionSize(34)
+
+    def render_saved_months_as_main_stat(self, month_rows: List[Dict[str, object]]) -> None:
+        headers = ["ID", "연도", "월", "출처", "저장시각"]
+        keys = ["id", "year", "month", "source_name", "imported_at"]
         self.cumulative_stats_table.clear()
         self.cumulative_stats_table.setColumnCount(len(headers))
         self.cumulative_stats_table.setHorizontalHeaderLabels(headers)
-        self.cumulative_stats_table.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            eligible_days = int(row.get("eligible_days") or 0)
-            total_work = int(row.get("total_work") or 0)
-            d_count = int(row.get("d_count") or 0)
-            s_count = int(row.get("s_count") or 0)
-            gy_count = int(row.get("weekday_gy_count") or 0) + int(row.get("duty_count") or 0)
-            values = [row.get(key) or 0 for key in keys] + [
-                self._percent(total_work, eligible_days),
-                self._percent(d_count, eligible_days),
-                self._percent(s_count, eligible_days),
-                self._percent(gy_count, eligible_days),
-            ]
+        self.cumulative_stats_table.setRowCount(len(month_rows))
+        for r, row in enumerate(month_rows):
+            for c, key in enumerate(keys):
+                self.cumulative_stats_table.setItem(r, c, QTableWidgetItem(str(row.get(key, ""))))
+
+    def render_period_shift_stats(self, start_year: int, start_month: int, end_year: int, end_month: int) -> None:
+        rows = period_assignment_rows(start_year, start_month, end_year, end_month)
+        work_shifts = {SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY}
+        by_emp: Dict[tuple[str, str], Dict[str, object]] = {}
+        for row in rows:
+            name = str(row.get("name") or "")
+            employee_no = str(row.get("employee_no") or "")
+            key = (name, employee_no)
+            d = date.fromisoformat(str(row.get("work_date")))
+            shift = str(row.get("shift_code") or OFF)
+            stat = by_emp.setdefault(key, {
+                "name": name,
+                "employee_no": employee_no,
+                "first_work_date": None,
+                "eligible_dates": set(),
+                "weekday_day": 0,
+                "weekday_swing": 0,
+                "holiday_day": 0,
+                "holiday_swing": 0,
+                "family_day": 0,
+                "family_swing": 0,
+                "gy": 0,
+                "duty": 0,
+                "total_work": 0,
+            })
+            if shift in work_shifts:
+                first = stat["first_work_date"]
+                if first is None or d < first:
+                    stat["first_work_date"] = d
+        for row in rows:
+            key = (str(row.get("name") or ""), str(row.get("employee_no") or ""))
+            stat = by_emp.get(key)
+            if not stat or stat["first_work_date"] is None:
+                continue
+            d = date.fromisoformat(str(row.get("work_date")))
+            if d < stat["first_work_date"]:
+                continue
+            stat["eligible_dates"].add(d)  # type: ignore[index]
+            shift = str(row.get("shift_code") or OFF)
+            if shift in work_shifts:
+                stat["total_work"] = int(stat["total_work"]) + 1
+            if shift == SHIFT_DAY:
+                if is_family_day(d):
+                    stat["family_day"] = int(stat["family_day"]) + 1
+                elif is_holiday_or_weekend(d, korean_holidays(d.year)):
+                    stat["holiday_day"] = int(stat["holiday_day"]) + 1
+                else:
+                    stat["weekday_day"] = int(stat["weekday_day"]) + 1
+            elif shift == SHIFT_SWING:
+                if is_family_day(d):
+                    stat["family_swing"] = int(stat["family_swing"]) + 1
+                elif is_holiday_or_weekend(d, korean_holidays(d.year)):
+                    stat["holiday_swing"] = int(stat["holiday_swing"]) + 1
+                else:
+                    stat["weekday_swing"] = int(stat["weekday_swing"]) + 1
+            elif shift == SHIFT_GY:
+                stat["gy"] = int(stat["gy"]) + 1
+            elif shift == SHIFT_DUTY:
+                stat["duty"] = int(stat["duty"]) + 1
+
+        mode = self.stats_mode_combo.currentText()
+        if mode == "GY/당직":
+            headers = ["성명", "사번", "첫근무일", "대상일수", "G/지근", "당직", "GY+당직", "GY율"]
+        else:
+            headers = ["성명", "사번", "첫근무일", "대상일수", "평일 D", "평일 S", "휴일 D", "휴일 S", "페데 D", "페데 S", "총근무", "근무율"]
+        values_rows = []
+        for stat in by_emp.values():
+            if stat["first_work_date"] is None:
+                continue
+            eligible_days = len(stat["eligible_dates"])  # type: ignore[arg-type]
+            if mode == "GY/당직":
+                gy_total = int(stat["gy"]) + int(stat["duty"])
+                values = [
+                    stat["name"], stat["employee_no"], stat["first_work_date"], eligible_days,
+                    stat["gy"], stat["duty"], gy_total, self._percent(gy_total, eligible_days),
+                ]
+            else:
+                values = [
+                    stat["name"], stat["employee_no"], stat["first_work_date"], eligible_days,
+                    stat["weekday_day"], stat["weekday_swing"],
+                    stat["holiday_day"], stat["holiday_swing"],
+                    stat["family_day"], stat["family_swing"],
+                    stat["total_work"], self._percent(int(stat["total_work"]), eligible_days),
+                ]
+            values_rows.append(values)
+        self.cumulative_stats_table.clear()
+        self.cumulative_stats_table.setColumnCount(len(headers))
+        self.cumulative_stats_table.setHorizontalHeaderLabels(headers)
+        self.cumulative_stats_table.setRowCount(len(values_rows))
+        for r, values in enumerate(values_rows):
             for c, value in enumerate(values):
-                self.cumulative_stats_table.setItem(r, c, QTableWidgetItem(str(value)))
-        self.cumulative_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.cumulative_stats_table.verticalHeader().setVisible(False)
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignCenter)
+                self.cumulative_stats_table.setItem(r, c, item)
 
     @staticmethod
     def _percent(numerator: int, denominator: int) -> str:

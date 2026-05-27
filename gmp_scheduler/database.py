@@ -204,6 +204,24 @@ def saved_months() -> List[Dict[str, object]]:
         return [dict(row) for row in rows]
 
 
+def period_assignment_rows(start_year: int, start_month: int, end_year: int, end_month: int) -> List[Dict[str, object]]:
+    start_key = start_year * 100 + start_month
+    end_key = end_year * 100 + end_month
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT e.name, e.employee_no, a.work_date, a.shift_code
+            FROM assignments a
+            JOIN employees e ON e.id = a.employee_id
+            JOIN monthly_schedules ms ON ms.id = a.schedule_id
+            WHERE (ms.year * 100 + ms.month) BETWEEN ? AND ?
+            ORDER BY a.work_date, a.id
+            """,
+            (start_key, end_key),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def load_schedule_result(year: int, month: int) -> Optional[ScheduleResult]:
     """Load the latest saved schedule for a year/month from the local DB."""
     from .calendar_utils import korean_holidays
