@@ -1175,19 +1175,25 @@ class MainWindow(QMainWindow):
             for col, d in enumerate(dates, start=2):
                 item = table.item(row, col)
                 result.schedule[d][emp.key] = self.normalize_shift(item.text() if item else "")
+        carryover_counts = self.previous_month_gy_carryover_counts(result)
+        for emp in result.employees:
+            count = min(carryover_counts.get(emp.key, 0), len(dates))
+            for day_index in range(count):
+                result.schedule[dates[day_index]][emp.key] = OFF
         expand_gy_blocks(result.employees, result.year, result.month, result.schedule)
-        self.apply_previous_month_gy_carryover(result)
+        self.apply_previous_month_gy_carryover(result, carryover_counts)
 
-    def apply_previous_month_gy_carryover(self, result: ScheduleResult) -> None:
+    def previous_month_gy_carryover_counts(self, result: ScheduleResult) -> Dict[str, int]:
         prev_year = result.year if result.month > 1 else result.year - 1
         prev_month = result.month - 1 if result.month > 1 else 12
         previous = load_schedule_result(prev_year, prev_month)
         if not previous:
-            return
+            return {}
         current_dates = month_dates(result.year, result.month)
         previous_dates = month_dates(prev_year, prev_month)
         previous_last = previous_dates[-1]
         employee_keys = {emp.key for emp in result.employees}
+        carryover_counts: Dict[str, int] = {}
         for emp in previous.employees:
             if emp.key not in employee_keys:
                 continue
@@ -1201,8 +1207,23 @@ class MainWindow(QMainWindow):
                 overflow = (block_end - previous_last).days
                 if overflow <= 0:
                     continue
-                for day_index in range(min(overflow, len(current_dates))):
-                    result.schedule[current_dates[day_index]][emp.key] = SHIFT_GY
+                carryover_counts[emp.key] = max(
+                    carryover_counts.get(emp.key, 0),
+                    min(overflow, len(current_dates)),
+                )
+        return carryover_counts
+
+    def apply_previous_month_gy_carryover(
+        self,
+        result: ScheduleResult,
+        carryover_counts: Optional[Dict[str, int]] = None,
+    ) -> None:
+        counts = carryover_counts if carryover_counts is not None else self.previous_month_gy_carryover_counts(result)
+        current_dates = month_dates(result.year, result.month)
+        for emp in result.employees:
+            count = min(counts.get(emp.key, 0), len(current_dates))
+            for day_index in range(count):
+                result.schedule[current_dates[day_index]][emp.key] = SHIFT_GY
 
     def sync_schedule_from_table(self) -> None:
         if not self.result:
