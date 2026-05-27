@@ -1347,6 +1347,7 @@ class MainWindow(QMainWindow):
 
     def render_period_shift_stats(self, start_year: int, start_month: int, end_year: int, end_month: int) -> None:
         rows = period_assignment_rows(start_year, start_month, end_year, end_month)
+        period_end = month_dates(end_year, end_month)[-1]
         work_shifts = {SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY}
         by_emp: Dict[tuple[str, str], Dict[str, object]] = {}
         for row in rows:
@@ -1368,6 +1369,8 @@ class MainWindow(QMainWindow):
                 "family_swing": 0,
                 "gy": 0,
                 "duty": 0,
+                "last_gy_date": None,
+                "last_duty_date": None,
                 "total_work": 0,
             })
             if shift in work_shifts:
@@ -1402,14 +1405,20 @@ class MainWindow(QMainWindow):
                     stat["weekday_swing"] = int(stat["weekday_swing"]) + 1
             elif shift == SHIFT_GY:
                 stat["gy"] = int(stat["gy"]) + 1
+                last_gy = stat["last_gy_date"]
+                if last_gy is None or d > last_gy:
+                    stat["last_gy_date"] = d
             elif shift == SHIFT_DUTY:
                 stat["duty"] = int(stat["duty"]) + 1
+                last_duty = stat["last_duty_date"]
+                if last_duty is None or d > last_duty:
+                    stat["last_duty_date"] = d
 
         mode = self.stats_mode_combo.currentText()
         value_mode = self.stats_value_mode_combo.currentText()
         if mode == "GY/당직":
-            headers = ["성명", "사번", "첫근무일", "대상일수", "G/지근", "당직", "GY+당직", "GY율"]
-            metric_keys = ["gy", "duty", "gy_total", "gy_total"]
+            headers = ["성명", "사번", "첫근무일", "대상일수", "G/지근", "당직", "GY+당직", "GY율", "이전 GY 후", "이전 당직 후"]
+            metric_keys = ["gy", "duty", "gy_total", "gy_total", "days_since_gy", "days_since_duty"]
         else:
             headers = ["성명", "사번", "첫근무일", "대상일수", "평일 D", "평일 S", "휴일 D", "휴일 S", "페데 D", "페데 S", "총근무", "근무율"]
             metric_keys = [
@@ -1419,7 +1428,7 @@ class MainWindow(QMainWindow):
                 "total_work", "total_work",
             ]
         values_rows = []
-        rate_rows = []
+        color_value_rows: List[List[Optional[float]]] = []
         for stat in by_emp.values():
             if stat["first_work_date"] is None:
                 continue
@@ -1427,12 +1436,21 @@ class MainWindow(QMainWindow):
             if mode == "GY/당직":
                 gy_total = int(stat["gy"]) + int(stat["duty"])
                 metric_counts = [int(stat["gy"]), int(stat["duty"]), gy_total, gy_total]
+                days_since_gy = self._days_since(stat["last_gy_date"], period_end)
+                days_since_duty = self._days_since(stat["last_duty_date"], period_end)
                 values = [
                     stat["name"], stat["employee_no"], stat["first_work_date"], eligible_days,
                     *[
                         self._format_stat_value(count, eligible_days, value_mode if idx < 3 else "퍼센트")
                         for idx, count in enumerate(metric_counts)
                     ],
+                    self._format_days_since(days_since_gy),
+                    self._format_days_since(days_since_duty),
+                ]
+                color_values: List[Optional[float]] = [
+                    *(count / eligible_days if eligible_days > 0 else 0.0 for count in metric_counts),
+                    float(days_since_gy) if days_since_gy is not None else None,
+                    float(days_since_duty) if days_since_duty is not None else None,
                 ]
             else:
                 metric_counts = [
@@ -1448,12 +1466,13 @@ class MainWindow(QMainWindow):
                         for idx, count in enumerate(metric_counts)
                     ],
                 ]
+                color_values = [
+                    count / eligible_days if eligible_days > 0 else 0.0
+                    for count in metric_counts
+                ]
             values_rows.append(values)
-            rate_rows.append([
-                count / eligible_days if eligible_days > 0 else 0.0
-                for count in metric_counts
-            ])
-        column_rates = list(zip(*rate_rows)) if rate_rows else []
+            color_value_rows.append(color_values)
+        column_values = list(zip(*color_value_rows)) if color_value_rows else []
         self.cumulative_stats_table.clear()
         self.cumulative_stats_table.setColumnCount(len(headers))
         self.cumulative_stats_table.setHorizontalHeaderLabels(headers)
@@ -1463,9 +1482,11 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 item.setTextAlignment(Qt.AlignCenter)
                 metric_index = c - 4
-                if 0 <= metric_index < len(metric_keys) and column_rates:
-                    rates = list(column_rates[metric_index])
-                    item.setBackground(self._relative_gradient_color(rate_rows[r][metric_index], rates))
+                if 0 <= metric_index < len(metric_keys) and column_values:
+                    current = color_value_rows[r][metric_index]
+                    values_for_color = [v for v in column_values[metric_index] if v is not None]
+                    if current is not None:
+                        item.setBackground(self._relative_gradient_color(current, values_for_color))
                 self.cumulative_stats_table.setItem(r, c, item)
 
     @staticmethod
@@ -1481,6 +1502,18 @@ class MainWindow(QMainWindow):
         if mode == "갯수+퍼센트":
             return f"{count} ({percent})"
         return str(count)
+
+    @staticmethod
+    def _days_since(last_date: object, period_end: date) -> Optional[int]:
+        if not isinstance(last_date, date):
+            return None
+        return max(0, (period_end - last_date).days)
+
+    @staticmethod
+    def _format_days_since(days: Optional[int]) -> str:
+        if days is None:
+            return "-"
+        return f"{days}일"
 
     @staticmethod
     def _relative_gradient_color(value: float, values: List[float]) -> QColor:
