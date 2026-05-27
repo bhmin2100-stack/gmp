@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QDate, QEvent, Qt
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -46,6 +46,7 @@ from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_S
 from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
+from .stats_exclusions import exclude_person, excluded_people, include_person
 from .validation import validate_schedule
 
 SHIFT_OPTIONS = ["", SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY, SHIFT_GY_REST]
@@ -255,6 +256,7 @@ class MainWindow(QMainWindow):
         self.month_stats_table = QTableWidget()
         self.cumulative_stats_table = QTableWidget()
         self.saved_months_table = QTableWidget()
+        self.current_stats_row_people: List[tuple[str, str]] = []
         self.warning_box = QTextEdit()
         self.warning_box.setReadOnly(True)
         self.warning_box.setMinimumHeight(60)
@@ -276,6 +278,8 @@ class MainWindow(QMainWindow):
         self.stats_value_mode_combo = QComboBox()
         self.stats_value_mode_combo.addItems(["갯수", "퍼센트", "갯수+퍼센트"])
         self.stats_value_mode_combo.currentTextChanged.connect(lambda _text: self.render_cumulative_stats())
+        self.cumulative_stats_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.cumulative_stats_table.customContextMenuRequested.connect(self.show_stats_table_menu)
         self.calendar_date_edit = QDateEdit()
         self.calendar_date_edit.setCalendarPopup(True)
         today = date.today()
@@ -456,7 +460,10 @@ class MainWindow(QMainWindow):
         period_layout.addWidget(QLabel("월"))
         refresh_cum_btn = QPushButton("누적 통계 새로고침")
         refresh_cum_btn.clicked.connect(self.render_cumulative_stats)
+        manage_excluded_btn = QPushButton("제외 인원 관리")
+        manage_excluded_btn.clicked.connect(self.show_stats_exclusion_manager)
         period_layout.addWidget(refresh_cum_btn)
+        period_layout.addWidget(manage_excluded_btn)
         period_layout.addStretch(1)
         stats_layout.addLayout(period_layout)
         stats_layout.addWidget(self.cumulative_stats_table)
@@ -1296,14 +1303,18 @@ class MainWindow(QMainWindow):
             return
         dates = month_dates(self.result.year, self.result.month)
         stats = compute_stats(self.result.employees, dates, self.result.schedule, self.result.holidays)
+        excluded = excluded_people("월간 통계")
+        stats = {key: stat for key, stat in stats.items() if key not in excluded}
         avg = averages(stats)
         headers = STAT_HEADERS + ["총근무 평균편차"]
         table = self.cumulative_stats_table
+        self.current_stats_row_people = []
         table.clear()
         table.setColumnCount(len(headers))
         table.setRowCount(len(stats))
         table.setHorizontalHeaderLabels(headers)
         for row, stat in enumerate(stats.values()):
+            self.current_stats_row_people.append((stat.employee_key, f"{stat.name} / {stat.employee_id}".rstrip(" / ")))
             values = stat.as_row() + [round(stat.total_work - avg.get("total_work", 0), 2)]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
@@ -1337,6 +1348,7 @@ class MainWindow(QMainWindow):
     def render_saved_months_as_main_stat(self, month_rows: List[Dict[str, object]]) -> None:
         headers = ["ID", "연도", "월", "출처", "저장시각"]
         keys = ["id", "year", "month", "source_name", "imported_at"]
+        self.current_stats_row_people = []
         self.cumulative_stats_table.clear()
         self.cumulative_stats_table.setColumnCount(len(headers))
         self.cumulative_stats_table.setHorizontalHeaderLabels(headers)
@@ -1416,6 +1428,7 @@ class MainWindow(QMainWindow):
 
         mode = self.stats_mode_combo.currentText()
         value_mode = self.stats_value_mode_combo.currentText()
+        excluded = excluded_people(mode)
         if mode == "GY/당직":
             headers = ["성명", "사번", "첫근무일", "대상일수", "G/지근", "당직", "GY+당직", "GY율", "이전 GY 후", "이전 당직 후"]
             metric_keys = ["gy", "duty", "gy_total", "gy_total", "days_since_gy", "days_since_duty"]
@@ -1428,9 +1441,13 @@ class MainWindow(QMainWindow):
                 "total_work", "total_work",
             ]
         values_rows = []
+        self.current_stats_row_people = []
         color_value_rows: List[List[Optional[float]]] = []
         for stat in by_emp.values():
             if stat["first_work_date"] is None:
+                continue
+            employee_key = f"{stat['name']}|{stat['employee_no']}"
+            if employee_key in excluded:
                 continue
             eligible_days = len(stat["eligible_dates"])  # type: ignore[arg-type]
             if mode == "GY/당직":
@@ -1471,6 +1488,10 @@ class MainWindow(QMainWindow):
                     for count in metric_counts
                 ]
             values_rows.append(values)
+            self.current_stats_row_people.append((
+                employee_key,
+                f"{stat['name']} / {stat['employee_no']}".rstrip(" / "),
+            ))
             color_value_rows.append(color_values)
         column_values = list(zip(*color_value_rows)) if color_value_rows else []
         self.cumulative_stats_table.clear()
@@ -1488,6 +1509,47 @@ class MainWindow(QMainWindow):
                     if current is not None:
                         item.setBackground(self._relative_gradient_color(current, values_for_color))
                 self.cumulative_stats_table.setItem(r, c, item)
+
+    def show_stats_table_menu(self, pos) -> None:
+        mode = self.stats_mode_combo.currentText()
+        if mode == "저장 월":
+            return
+        menu = QMenu(self)
+        row = self.cumulative_stats_table.rowAt(pos.y())
+        if 0 <= row < len(self.current_stats_row_people):
+            employee_key, label = self.current_stats_row_people[row]
+            menu.addAction(f"{label} 제외").triggered.connect(
+                lambda _checked=False, m=mode, k=employee_key, l=label: self.exclude_stats_person(m, k, l)
+            )
+            menu.addSeparator()
+        menu.addAction("제외 인원 관리").triggered.connect(self.show_stats_exclusion_manager)
+        menu.exec(self.cumulative_stats_table.viewport().mapToGlobal(pos))
+
+    def exclude_stats_person(self, mode: str, employee_key: str, label: str) -> None:
+        exclude_person(mode, employee_key, label)
+        self.render_cumulative_stats()
+
+    def restore_stats_person(self, mode: str, employee_key: str) -> None:
+        include_person(mode, employee_key)
+        self.render_cumulative_stats()
+
+    def show_stats_exclusion_manager(self) -> None:
+        mode = self.stats_mode_combo.currentText()
+        if mode == "저장 월":
+            QMessageBox.information(self, "제외 인원 관리", "저장 월 목록에는 제외 인원을 적용하지 않습니다.")
+            return
+        excluded = excluded_people(mode)
+        if not excluded:
+            QMessageBox.information(self, "제외 인원 관리", f"{mode} 제외 인원이 없습니다.")
+            return
+        menu = QMenu(self)
+        menu.addAction(f"{mode} 제외 인원")
+        menu.addSeparator()
+        for employee_key, label in sorted(excluded.items(), key=lambda item: item[1]):
+            menu.addAction(f"{label} 복구").triggered.connect(
+                lambda _checked=False, m=mode, k=employee_key: self.restore_stats_person(m, k)
+            )
+        menu.exec(QCursor.pos())
 
     @staticmethod
     def _percent(numerator: int, denominator: int) -> str:
