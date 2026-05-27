@@ -60,6 +60,7 @@ SHIFT_COLORS = {
 }
 WARNING_COLOR = QColor("#f4cccc")
 HOLIDAY_HEADER_COLOR = QColor("#f4cccc")
+FAMILY_HEADER_COLOR = QColor("#ffd966")
 STAFFING_OK_COLOR = QColor("#008000")
 OVERVIEW_START_YEAR = 2025
 NAME_COL_WIDTH = 74
@@ -256,6 +257,7 @@ class MainWindow(QMainWindow):
         self.saved_months_table = QTableWidget()
         self.warning_box = QTextEdit()
         self.warning_box.setReadOnly(True)
+        self.warning_box.setMinimumHeight(60)
         self.stats_start_year_spin = QSpinBox()
         self.stats_start_year_spin.setRange(2020, 2100)
         self.stats_start_year_spin.setValue(OVERVIEW_START_YEAR)
@@ -418,24 +420,7 @@ class MainWindow(QMainWindow):
 
         year_tab = QWidget()
         year_layout = QVBoxLayout(year_tab)
-        year_layout.addWidget(QLabel("2025년 1월부터 현재/선택 연도까지의 근무표입니다. 각 월 표를 클릭하고 Ctrl+V 하면 그 월에 엑셀 근무표가 바로 붙습니다. 마우스 휠로 계속 내려보세요."))
-        calendar_edit_layout = QHBoxLayout()
-        calendar_edit_layout.addWidget(QLabel("휴일/페밀리데이 편집"))
-        calendar_edit_layout.addWidget(self.calendar_date_edit)
-        add_holiday_btn = QPushButton("공휴일 추가")
-        add_holiday_btn.clicked.connect(self.add_selected_holiday)
-        remove_holiday_btn = QPushButton("공휴일 제외")
-        remove_holiday_btn.clicked.connect(self.remove_selected_holiday)
-        add_family_btn = QPushButton("페밀리데이 추가")
-        add_family_btn.clicked.connect(self.add_selected_family_day)
-        remove_family_btn = QPushButton("페밀리데이 제외")
-        remove_family_btn.clicked.connect(self.remove_selected_family_day)
-        calendar_edit_layout.addWidget(add_holiday_btn)
-        calendar_edit_layout.addWidget(remove_holiday_btn)
-        calendar_edit_layout.addWidget(add_family_btn)
-        calendar_edit_layout.addWidget(remove_family_btn)
-        calendar_edit_layout.addStretch(1)
-        year_layout.addLayout(calendar_edit_layout)
+        year_layout.addWidget(QLabel("2025년 1월부터 현재/선택 연도까지의 근무표입니다. 각 월 표를 클릭하고 Ctrl+V 하면 그 월에 엑셀 근무표가 바로 붙습니다. 날짜 헤더 우클릭으로 휴일/페밀리데이를 편집합니다."))
         self.year_scroll = QScrollArea()
         self.year_scroll.setWidgetResizable(True)
         self.year_scroll_content = QWidget()
@@ -499,6 +484,10 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(tabs)
         splitter.addWidget(self.warning_box)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 1)
         splitter.setSizes([650, 160])
         root_layout.addWidget(splitter)
         self.setCentralWidget(root)
@@ -1028,8 +1017,11 @@ class MainWindow(QMainWindow):
         )
         for col, d in enumerate(dates, start=2):
             item = table.horizontalHeaderItem(col)
-            if item and is_holiday_or_weekend(d, result.holidays):
-                item.setBackground(HOLIDAY_HEADER_COLOR)
+            if item:
+                if is_family_day(d):
+                    item.setBackground(FAMILY_HEADER_COLOR)
+                elif is_holiday_or_weekend(d, result.holidays):
+                    item.setBackground(HOLIDAY_HEADER_COLOR)
             self.apply_staffing_header_style(table, result, col, d)
         if not result.employees:
             hint = QTableWidgetItem("여기에 클릭 후 Ctrl+V")
@@ -1105,8 +1097,12 @@ class MainWindow(QMainWindow):
             lambda pos: self.show_date_header_menu(self.schedule_table, pos)
         )
         for col, d in enumerate(dates, start=2):
-            if is_holiday_or_weekend(d, self.result.holidays):
-                self.schedule_table.horizontalHeaderItem(col).setBackground(HOLIDAY_HEADER_COLOR)
+            item = self.schedule_table.horizontalHeaderItem(col)
+            if item:
+                if is_family_day(d):
+                    item.setBackground(FAMILY_HEADER_COLOR)
+                elif is_holiday_or_weekend(d, self.result.holidays):
+                    item.setBackground(HOLIDAY_HEADER_COLOR)
             self.apply_staffing_header_style(self.schedule_table, self.result, col, d)
         for row, emp in enumerate(self.result.employees):
             name_item = QTableWidgetItem(emp.name)
