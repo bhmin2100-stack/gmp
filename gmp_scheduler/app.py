@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import re
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -138,15 +138,26 @@ class MonthRosterTable(PasteTableWidget):
         self.month = month
         self.setToolTip("이 월 표를 클릭한 뒤 Ctrl+V 하면 엑셀 근무표가 바로 붙여넣어집니다.")
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.AnyKeyPressed
+        )
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.matches(QKeySequence.Copy):
+            self.owner.copy_table_selection_to_clipboard(self, skip_columns=2)
+            return
         if event.matches(QKeySequence.Paste):
-            self.owner.paste_schedule_from_clipboard_for_month(self.year, self.month)
+            self.owner.paste_month_table_clipboard(self)
             return
         super().keyPressEvent(event)
 
     def paste_text(self, text: str) -> None:
-        self.owner.paste_schedule_from_clipboard_for_month(self.year, self.month)
+        self.owner.paste_month_table_clipboard(self)
 
 
 class CurrentMonthRosterTable(PasteTableWidget):
@@ -272,6 +283,7 @@ class MainWindow(QMainWindow):
         loaded = load_schedule_result(current_year, current_month)
         if loaded:
             self.result = loaded
+            self.apply_previous_month_gy_carryover(self.result)
             self.employees = list(loaded.employees)
         else:
             self.result = ScheduleResult(
@@ -572,6 +584,10 @@ class MainWindow(QMainWindow):
             if table is not None:
                 self.paste_current_month_clipboard()
                 return True
+            table = self._focus_ancestor(MonthRosterTable)
+            if table is not None:
+                self.paste_month_table_clipboard(table)
+                return True
             target = self._paste_target_month_from_focus()
             if target is not None:
                 year, month = target
@@ -623,13 +639,13 @@ class MainWindow(QMainWindow):
         self.year_spin.setValue(year)
         self.month_spin.setValue(month)
         self.result = pasted
+        self.apply_previous_month_gy_carryover(self.result)
         self.employees = list(pasted.employees)
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
         try:
-            save_schedule(self.result, f"{year}-{month:02d}")
-            save_unavailable_days(self.result.employees, f"{year}-{month:02d}")
+            self.save_result_silently(self.result)
             self.render_cumulative_stats()
         except Exception as exc:
             QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
@@ -643,13 +659,13 @@ class MainWindow(QMainWindow):
         self.year_spin.setValue(result.year)
         self.month_spin.setValue(result.month)
         self.result = result
+        self.apply_previous_month_gy_carryover(self.result)
         self.employees = list(result.employees)
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
         try:
-            save_schedule(self.result, f"{result.year}-{result.month:02d}")
-            save_unavailable_days(self.result.employees, f"{result.year}-{result.month:02d}")
+            self.save_result_silently(self.result)
             self.render_cumulative_stats()
         except Exception as exc:
             QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
@@ -678,6 +694,71 @@ class MainWindow(QMainWindow):
             self.paste_schedule_from_clipboard()
             return
         self.paste_schedule_cells_from_clipboard()
+
+    def paste_month_table_clipboard(self, table: MonthRosterTable) -> None:
+        if self.clipboard_looks_like_full_roster():
+            self.paste_schedule_from_clipboard_for_month(table.year, table.month)
+            return
+        result = getattr(table, "result", None)
+        if not isinstance(result, ScheduleResult):
+            return
+        self.paste_cells_into_table(table, result)
+
+    def paste_cells_into_table(self, table: QTableWidget, result: ScheduleResult) -> None:
+        matrix = self._clipboard_matrix()
+        if not matrix:
+            return
+        start_row = max(0, table.currentRow())
+        start_col = max(2, table.currentColumn())
+        table.blockSignals(True)
+        for r_offset, values in enumerate(matrix):
+            row = start_row + r_offset
+            if row >= table.rowCount():
+                continue
+            for c_offset, raw in enumerate(values):
+                col = start_col + c_offset
+                if col < 2 or col >= table.columnCount():
+                    continue
+                shift = normalize_shift_code(raw)
+                item = table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    table.setItem(row, col, item)
+                item.setText("" if shift == OFF else shift)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+        table.blockSignals(False)
+        self.sync_result_from_table(table, result)
+        self.save_result_silently(result)
+        if self.result and self.result.year == result.year and self.result.month == result.month:
+            self.result = result
+            self.employees = list(result.employees)
+            self.render_schedule_table()
+            self.refresh_validation_and_stats()
+        self.render_year_overview()
+
+    def save_result_silently(self, result: ScheduleResult) -> None:
+        save_schedule(result, f"{result.year}-{result.month:02d}")
+        save_unavailable_days(result.employees, f"{result.year}-{result.month:02d}")
+        self.update_next_month_gy_carryover(result)
+
+    def update_next_month_gy_carryover(self, result: ScheduleResult) -> None:
+        next_year = result.year if result.month < 12 else result.year + 1
+        next_month = result.month + 1 if result.month < 12 else 1
+        next_result = load_schedule_result(next_year, next_month)
+        if not next_result:
+            return
+        before = {
+            d: dict(next_result.schedule.get(d, {}))
+            for d in month_dates(next_year, next_month)[:6]
+        }
+        self.apply_previous_month_gy_carryover(next_result)
+        after = {
+            d: dict(next_result.schedule.get(d, {}))
+            for d in month_dates(next_year, next_month)[:6]
+        }
+        if before != after:
+            save_schedule(next_result, f"{next_year}-{next_month:02d}")
 
     def copy_schedule_selection_to_clipboard(self) -> None:
         self.copy_table_selection_to_clipboard(self.schedule_table, skip_columns=2)
@@ -808,6 +889,7 @@ class MainWindow(QMainWindow):
         try:
             schedule_id = save_schedule(self.result, source_name)
             save_unavailable_days(self.result.employees, source_name)
+            self.update_next_month_gy_carryover(self.result)
         except Exception as exc:
             QMessageBox.critical(self, "DB 저장 실패", str(exc))
             return
@@ -905,6 +987,8 @@ class MainWindow(QMainWindow):
         dates = month_dates(result.year, result.month)
         row_count = max(1, len(result.employees))
         table = MonthRosterTable(self, result.year, result.month, row_count, len(dates) + 2)
+        table.result = result
+        table.setItemDelegate(ShiftComboDelegate(table))
         table.setHorizontalHeaderLabels(["성명", "사번"] + [str(d.day) for d in dates])
         table.verticalHeader().setVisible(False)
         for col, d in enumerate(dates, start=2):
@@ -922,15 +1006,20 @@ class MainWindow(QMainWindow):
                 table.setItem(0, col, QTableWidgetItem(""))
         else:
             for row, emp in enumerate(result.employees):
-                table.setItem(row, 0, QTableWidgetItem(emp.name))
-                table.setItem(row, 1, QTableWidgetItem(emp.employee_id))
+                name_item = QTableWidgetItem(emp.name)
+                id_item = QTableWidgetItem(emp.employee_id)
+                name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+                id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+                table.setItem(row, 0, name_item)
+                table.setItem(row, 1, id_item)
                 for col, d in enumerate(dates, start=2):
                     shift = result.schedule.get(d, {}).get(emp.key, OFF)
                     cell = QTableWidgetItem(shift)
                     cell.setTextAlignment(Qt.AlignCenter)
                     cell.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
-                    cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+                    cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                     table.setItem(row, col, cell)
+        table.cellChanged.connect(lambda row, col, t=table: self.on_month_table_cell_changed(t, row, col))
         self.configure_roster_table_layout(table, len(dates), row_count, overview=True)
         return table
 
@@ -1011,20 +1100,71 @@ class MainWindow(QMainWindow):
         self.render_schedule_table()
         self.refresh_validation_and_stats()
 
+    def on_month_table_cell_changed(self, table: MonthRosterTable, row: int, col: int) -> None:
+        if col < 2:
+            return
+        result = getattr(table, "result", None)
+        if not isinstance(result, ScheduleResult):
+            return
+        item = table.item(row, col)
+        if not item:
+            return
+        normalized = self.normalize_shift(item.text())
+        table.blockSignals(True)
+        item.setText("" if normalized == OFF else normalized)
+        item.setBackground(SHIFT_COLORS.get(normalized, QColor("#ffffff")))
+        table.blockSignals(False)
+        self.sync_result_from_table(table, result)
+        self.save_result_silently(result)
+        if self.result and self.result.year == result.year and self.result.month == result.month:
+            self.result = result
+            self.render_schedule_table()
+            self.refresh_validation_and_stats()
+        self.render_year_overview()
+
     @staticmethod
     def normalize_shift(text: str) -> str:
         return normalize_shift_code(text)
 
+    def sync_result_from_table(self, table: QTableWidget, result: ScheduleResult) -> None:
+        dates = month_dates(result.year, result.month)
+        for row, emp in enumerate(result.employees):
+            for col, d in enumerate(dates, start=2):
+                item = table.item(row, col)
+                result.schedule[d][emp.key] = self.normalize_shift(item.text() if item else "")
+        expand_gy_blocks(result.employees, result.year, result.month, result.schedule)
+        self.apply_previous_month_gy_carryover(result)
+
+    def apply_previous_month_gy_carryover(self, result: ScheduleResult) -> None:
+        prev_year = result.year if result.month > 1 else result.year - 1
+        prev_month = result.month - 1 if result.month > 1 else 12
+        previous = load_schedule_result(prev_year, prev_month)
+        if not previous:
+            return
+        current_dates = month_dates(result.year, result.month)
+        previous_dates = month_dates(prev_year, prev_month)
+        previous_last = previous_dates[-1]
+        employee_keys = {emp.key for emp in result.employees}
+        for emp in previous.employees:
+            if emp.key not in employee_keys:
+                continue
+            for d in previous_dates:
+                if previous.schedule.get(d, {}).get(emp.key, OFF) != SHIFT_GY:
+                    continue
+                prev_day = d - timedelta(days=1)
+                if prev_day in previous.schedule and previous.schedule.get(prev_day, {}).get(emp.key, OFF) == SHIFT_GY:
+                    continue
+                block_end = d + timedelta(days=5)
+                overflow = (block_end - previous_last).days
+                if overflow <= 0:
+                    continue
+                for day_index in range(min(overflow, len(current_dates))):
+                    result.schedule[current_dates[day_index]][emp.key] = SHIFT_GY
+
     def sync_schedule_from_table(self) -> None:
         if not self.result:
             return
-        dates = month_dates(self.result.year, self.result.month)
-        for row, emp in enumerate(self.result.employees):
-            for col, d in enumerate(dates, start=2):
-                item = self.schedule_table.item(row, col)
-                shift = self.normalize_shift(item.text() if item else "")
-                self.result.schedule[d][emp.key] = shift
-        expand_gy_blocks(self.result.employees, self.result.year, self.result.month, self.result.schedule)
+        self.sync_result_from_table(self.schedule_table, self.result)
 
     def apply_staffing_header_style(self, table: QTableWidget, result: ScheduleResult, col: int, d: date) -> None:
         item = table.horizontalHeaderItem(col)
