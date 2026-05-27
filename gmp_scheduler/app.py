@@ -273,6 +273,9 @@ class MainWindow(QMainWindow):
         self.stats_mode_combo = QComboBox()
         self.stats_mode_combo.addItems(["월간 통계", "근무율", "GY/당직", "저장 월"])
         self.stats_mode_combo.currentTextChanged.connect(lambda _text: self.render_cumulative_stats())
+        self.stats_value_mode_combo = QComboBox()
+        self.stats_value_mode_combo.addItems(["갯수", "퍼센트", "갯수+퍼센트"])
+        self.stats_value_mode_combo.currentTextChanged.connect(lambda _text: self.render_cumulative_stats())
         self.calendar_date_edit = QDateEdit()
         self.calendar_date_edit.setCalendarPopup(True)
         today = date.today()
@@ -440,6 +443,8 @@ class MainWindow(QMainWindow):
         period_layout = QHBoxLayout()
         period_layout.addWidget(QLabel("통계"))
         period_layout.addWidget(self.stats_mode_combo)
+        period_layout.addWidget(QLabel("표시"))
+        period_layout.addWidget(self.stats_value_mode_combo)
         period_layout.addWidget(QLabel("기간"))
         period_layout.addWidget(self.stats_start_year_spin)
         period_layout.addWidget(QLabel("년"))
@@ -1401,30 +1406,54 @@ class MainWindow(QMainWindow):
                 stat["duty"] = int(stat["duty"]) + 1
 
         mode = self.stats_mode_combo.currentText()
+        value_mode = self.stats_value_mode_combo.currentText()
         if mode == "GY/당직":
             headers = ["성명", "사번", "첫근무일", "대상일수", "G/지근", "당직", "GY+당직", "GY율"]
+            metric_keys = ["gy", "duty", "gy_total", "gy_total"]
         else:
             headers = ["성명", "사번", "첫근무일", "대상일수", "평일 D", "평일 S", "휴일 D", "휴일 S", "페데 D", "페데 S", "총근무", "근무율"]
+            metric_keys = [
+                "weekday_day", "weekday_swing",
+                "holiday_day", "holiday_swing",
+                "family_day", "family_swing",
+                "total_work", "total_work",
+            ]
         values_rows = []
+        rate_rows = []
         for stat in by_emp.values():
             if stat["first_work_date"] is None:
                 continue
             eligible_days = len(stat["eligible_dates"])  # type: ignore[arg-type]
             if mode == "GY/당직":
                 gy_total = int(stat["gy"]) + int(stat["duty"])
+                metric_counts = [int(stat["gy"]), int(stat["duty"]), gy_total, gy_total]
                 values = [
                     stat["name"], stat["employee_no"], stat["first_work_date"], eligible_days,
-                    stat["gy"], stat["duty"], gy_total, self._percent(gy_total, eligible_days),
+                    *[
+                        self._format_stat_value(count, eligible_days, value_mode if idx < 3 else "퍼센트")
+                        for idx, count in enumerate(metric_counts)
+                    ],
                 ]
             else:
+                metric_counts = [
+                    int(stat["weekday_day"]), int(stat["weekday_swing"]),
+                    int(stat["holiday_day"]), int(stat["holiday_swing"]),
+                    int(stat["family_day"]), int(stat["family_swing"]),
+                    int(stat["total_work"]), int(stat["total_work"]),
+                ]
                 values = [
                     stat["name"], stat["employee_no"], stat["first_work_date"], eligible_days,
-                    stat["weekday_day"], stat["weekday_swing"],
-                    stat["holiday_day"], stat["holiday_swing"],
-                    stat["family_day"], stat["family_swing"],
-                    stat["total_work"], self._percent(int(stat["total_work"]), eligible_days),
+                    *[
+                        self._format_stat_value(count, eligible_days, value_mode if idx < 7 else "퍼센트")
+                        for idx, count in enumerate(metric_counts)
+                    ],
                 ]
             values_rows.append(values)
+            rate_rows.append([
+                count / eligible_days if eligible_days > 0 else 0.0
+                for count in metric_counts
+            ])
+        column_rates = list(zip(*rate_rows)) if rate_rows else []
         self.cumulative_stats_table.clear()
         self.cumulative_stats_table.setColumnCount(len(headers))
         self.cumulative_stats_table.setHorizontalHeaderLabels(headers)
@@ -1433,6 +1462,10 @@ class MainWindow(QMainWindow):
             for c, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setTextAlignment(Qt.AlignCenter)
+                metric_index = c - 4
+                if 0 <= metric_index < len(metric_keys) and column_rates:
+                    rates = list(column_rates[metric_index])
+                    item.setBackground(self._relative_gradient_color(rate_rows[r][metric_index], rates))
                 self.cumulative_stats_table.setItem(r, c, item)
 
     @staticmethod
@@ -1440,6 +1473,39 @@ class MainWindow(QMainWindow):
         if denominator <= 0:
             return "0.0%"
         return f"{numerator / denominator * 100:.1f}%"
+
+    def _format_stat_value(self, count: int, denominator: int, mode: str) -> str:
+        percent = self._percent(count, denominator)
+        if mode == "퍼센트":
+            return percent
+        if mode == "갯수+퍼센트":
+            return f"{count} ({percent})"
+        return str(count)
+
+    @staticmethod
+    def _relative_gradient_color(value: float, values: List[float]) -> QColor:
+        if not values:
+            return QColor("#ffffff")
+        low = min(values)
+        high = max(values)
+        if high <= low:
+            return QColor("#ffffff")
+        center = sum(values) / len(values)
+        if value >= center:
+            span = max(high - center, 0.000001)
+            strength = min(1.0, (value - center) / span)
+            base = (255, 255, 255)
+            target = (244, 204, 204)
+        else:
+            span = max(center - low, 0.000001)
+            strength = min(1.0, (center - value) / span)
+            base = (255, 255, 255)
+            target = (207, 226, 243)
+        mix = 0.25 + 0.75 * strength
+        r = round(base[0] * (1 - mix) + target[0] * mix)
+        g = round(base[1] * (1 - mix) + target[1] * mix)
+        b = round(base[2] * (1 - mix) + target[2] * mix)
+        return QColor(r, g, b)
 
     def render_warnings(self) -> None:
         if not self.result:
