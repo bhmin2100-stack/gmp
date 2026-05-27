@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import re
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -456,7 +457,30 @@ class MainWindow(QMainWindow):
 
     def _clipboard_text_html(self) -> tuple[str, str]:
         mime = QApplication.clipboard().mimeData()
-        return QApplication.clipboard().text(), mime.html() if mime and mime.hasHtml() else ""
+        text = QApplication.clipboard().text()
+        html = mime.html() if mime and mime.hasHtml() else ""
+        if not html and mime:
+            for fmt in mime.formats():
+                if "html" not in fmt.lower():
+                    continue
+                raw = bytes(mime.data(fmt))
+                header = raw[:300].decode("ascii", errors="ignore")
+                match = re.search(r"StartHTML:(\d+).*?EndHTML:(\d+)", header, flags=re.S)
+                if match:
+                    start, end = int(match.group(1)), int(match.group(2))
+                    if 0 <= start < end <= len(raw):
+                        raw = raw[start:end]
+                for encoding in ("utf-8", "utf-16", "cp949", "latin-1"):
+                    try:
+                        candidate = raw.decode(encoding, errors="ignore")
+                    except Exception:
+                        continue
+                    if "<table" in candidate.lower() or "<html" in candidate.lower():
+                        html = candidate
+                        break
+                if html:
+                    break
+        return text, html
 
     def _paste_target_month_from_focus(self) -> Optional[tuple[int, int]]:
         """Return target year/month when Ctrl+V happens inside a roster table.
