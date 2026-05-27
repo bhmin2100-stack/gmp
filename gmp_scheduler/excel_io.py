@@ -444,6 +444,45 @@ def is_gray_fill(cell) -> bool:
     return max(r, g, b) - min(r, g, b) <= 18 and 70 <= (r + g + b) / 3 <= 235
 
 
+def is_blue_fill(cell) -> bool:
+    fill = getattr(cell, "fill", None)
+    if fill is None or not getattr(fill, "fill_type", None):
+        return False
+    rgb = _rgb_from_openpyxl_color(getattr(fill, "fgColor", None)) or _rgb_from_openpyxl_color(getattr(fill, "start_color", None))
+    return is_blue_rgb(rgb)
+
+
+def import_schedule_from_excel(path: str | Path, year: int, month: int, rules: Optional[ShiftRules] = None) -> ScheduleResult:
+    """Read an Excel roster directly, including cell fill colors.
+
+    This is more reliable than clipboard paste for color-only G/지근 marks
+    because openpyxl reads the workbook cell styles directly.
+    """
+    try:
+        from openpyxl import load_workbook  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("openpyxl이 필요합니다. `pip install -r requirements.txt`를 실행하세요.") from exc
+
+    wb = load_workbook(path, data_only=True)
+    ws = wb.active
+    lines: List[str] = []
+    for row in ws.iter_rows():
+        values: List[str] = []
+        has_any = False
+        for cell in row:
+            value = "" if cell.value is None else str(cell.value).strip()
+            if not value and is_blue_fill(cell):
+                value = SHIFT_GY
+            if value:
+                has_any = True
+            values.append(value)
+        if has_any:
+            lines.append("\t".join(values))
+    if not lines:
+        raise ValueError("엑셀 파일에서 근무표 데이터를 찾지 못했습니다.")
+    return parse_schedule_from_tsv("\n".join(lines), year, month, rules)
+
+
 def import_unavailable_from_gray_excel(path: str | Path, year: int, month: int) -> Dict[str, Set[date]]:
     """Read an Excel roster and return unavailable dates from gray-filled date cells.
 

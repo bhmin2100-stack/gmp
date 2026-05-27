@@ -227,7 +227,7 @@ def load_schedule_result(year: int, month: int) -> Optional[ScheduleResult]:
             FROM assignments a
             JOIN employees e ON e.id = a.employee_id
             WHERE a.schedule_id=?
-            ORDER BY e.name, e.employee_no, a.work_date
+            ORDER BY a.work_date, a.id
             """,
             (int(sched["id"]),),
         ).fetchall()

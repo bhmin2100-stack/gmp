@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 
 from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .database import cumulative_stats, load_schedule_result, save_schedule, save_unavailable_days, saved_months
-from .excel_io import export_schedule_to_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
+from .excel_io import export_schedule_to_excel, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
@@ -319,10 +319,13 @@ class MainWindow(QMainWindow):
         refresh_year_btn.clicked.connect(self.render_year_overview)
         paste_btn = QPushButton("엑셀 근무표 붙여넣기")
         paste_btn.clicked.connect(self.paste_schedule_from_clipboard)
+        import_excel_btn = QPushButton("엑셀 파일 근무표 불러오기")
+        import_excel_btn.clicked.connect(self.import_schedule_excel)
         top.addWidget(generate_btn)
         top.addWidget(validate_btn)
         top.addWidget(refresh_year_btn)
         top.addWidget(paste_btn)
+        top.addWidget(import_excel_btn)
         top.addStretch(1)
         root_layout.addLayout(top)
 
@@ -581,6 +584,40 @@ class MainWindow(QMainWindow):
 
     def paste_schedule_from_clipboard(self) -> None:
         self.paste_schedule_from_clipboard_for_month(self.year_spin.value(), self.month_spin.value())
+
+    def apply_imported_schedule(self, result: ScheduleResult, source_label: str) -> None:
+        self.year_spin.setValue(result.year)
+        self.month_spin.setValue(result.month)
+        self.result = result
+        self.employees = list(result.employees)
+        self.add_employee_rows(self.employees)
+        self.render_schedule_table()
+        self.refresh_validation_and_stats()
+        try:
+            save_schedule(self.result, f"{result.year}-{result.month:02d}")
+            save_unavailable_days(self.result.employees, f"{result.year}-{result.month:02d}")
+            self.render_cumulative_stats()
+        except Exception as exc:
+            QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
+        self.render_year_overview()
+        QMessageBox.information(self, "근무표 반영", f"{source_label}에서 {len(self.employees)}명을 인식했고 DB에 자동 저장했습니다.")
+
+    def import_schedule_excel(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "근무표 엑셀 파일 선택",
+            "",
+            "Excel Files (*.xlsx *.xlsm)",
+        )
+        if not path:
+            return
+        self.sync_rules_from_widgets()
+        try:
+            imported = import_schedule_from_excel(path, self.year_spin.value(), self.month_spin.value(), self.rules)
+        except Exception as exc:
+            QMessageBox.warning(self, "엑셀 불러오기 실패", str(exc))
+            return
+        self.apply_imported_schedule(imported, Path(path).name)
 
     def paste_current_month_clipboard(self) -> None:
         if self.clipboard_looks_like_full_roster():
