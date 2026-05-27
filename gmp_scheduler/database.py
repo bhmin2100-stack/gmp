@@ -240,7 +240,7 @@ def load_schedule_result(year: int, month: int) -> Optional[ScheduleResult]:
             return None
         rows = conn.execute(
             """
-            SELECT e.name, e.employee_no, e.is_new, a.work_date, a.shift_code
+            SELECT e.id AS employee_db_id, e.name, e.employee_no, e.is_new, a.work_date, a.shift_code
             FROM assignments a
             JOIN employees e ON e.id = a.employee_id
             WHERE a.schedule_id=?
@@ -251,11 +251,37 @@ def load_schedule_result(year: int, month: int) -> Optional[ScheduleResult]:
         if not rows:
             return None
 
-        emp_by_key: Dict[str, Employee] = {}
+        employee_ids_by_key: Dict[str, int] = {}
+        employee_meta_by_key: Dict[str, tuple[str, str, bool]] = {}
         for row in rows:
-            emp = Employee(str(row["name"]), str(row["employee_no"] or ""), bool(row["is_new"]))
-            emp_by_key[emp.key] = emp
-        employees = list(emp_by_key.values())
+            name = str(row["name"])
+            employee_no = str(row["employee_no"] or "")
+            key = f"{name}|{employee_no}"
+            employee_ids_by_key[key] = int(row["employee_db_id"])
+            employee_meta_by_key[key] = (name, employee_no, bool(row["is_new"]))
+        unavailable_by_key: Dict[str, Set[date]] = {key: set() for key in employee_meta_by_key}
+        if employee_ids_by_key:
+            placeholders = ",".join("?" for _ in employee_ids_by_key)
+            start_date = month_dates(year, month)[0].isoformat()
+            end_date = month_dates(year, month)[-1].isoformat()
+            unavailable_rows = conn.execute(
+                f"""
+                SELECT employee_id, work_date
+                FROM unavailable_days
+                WHERE employee_id IN ({placeholders})
+                  AND work_date BETWEEN ? AND ?
+                """,
+                (*employee_ids_by_key.values(), start_date, end_date),
+            ).fetchall()
+            key_by_employee_id = {employee_id: key for key, employee_id in employee_ids_by_key.items()}
+            for unavailable_row in unavailable_rows:
+                key = key_by_employee_id.get(int(unavailable_row["employee_id"]))
+                if key:
+                    unavailable_by_key.setdefault(key, set()).add(date.fromisoformat(str(unavailable_row["work_date"])))
+        employees = [
+            Employee(name, employee_no, is_new, unavailable_by_key.get(key, set()))
+            for key, (name, employee_no, is_new) in employee_meta_by_key.items()
+        ]
         schedule: ScheduleMap = {d: {emp.key: OFF for emp in employees} for d in month_dates(year, month)}
         for row in rows:
             d = date.fromisoformat(str(row["work_date"]))

@@ -662,11 +662,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "붙여넣기 실패", "클립보드가 비어 있습니다. 엑셀에서 표 범위를 먼저 복사하세요.")
             return
         self.sync_rules_from_widgets()
+        unavailable_map: Dict[str, set[date]] = {}
+        if html.strip():
+            try:
+                unavailable_map = parse_unavailable_from_clipboard(text, html, year, month)
+            except Exception:
+                unavailable_map = {}
         try:
             pasted = parse_schedule_from_clipboard(text, html, year, month, self.rules)
         except Exception as exc:
+            if unavailable_map and self.apply_unavailable_map_to_current_month(year, month, unavailable_map):
+                return
             QMessageBox.warning(self, "붙여넣기 실패", f"{year}년 {month}월 근무표를 읽지 못했습니다.\n{exc}")
             return
+
+        if unavailable_map:
+            pasted.employees = self.merge_unavailable_into_employees(pasted.employees, unavailable_map)
+            if not self.result_has_work_marks(pasted) and self.apply_unavailable_map_to_current_month(year, month, unavailable_map):
+                return
 
         self.year_spin.setValue(year)
         self.month_spin.setValue(month)
@@ -683,6 +696,58 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
         self.render_year_overview()
         QMessageBox.information(self, "근무표 반영", f"{year}년 {month}월 표에서 {len(self.employees)}명을 인식했고 DB에 자동 저장했습니다.")
+
+    @staticmethod
+    def result_has_work_marks(result: ScheduleResult) -> bool:
+        work_shifts = {SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY}
+        return any(
+            shift in work_shifts
+            for day_map in result.schedule.values()
+            for shift in day_map.values()
+        )
+
+    @staticmethod
+    def merge_unavailable_into_employees(
+        employees: List[Employee],
+        unavailable_map: Dict[str, set[date]],
+    ) -> List[Employee]:
+        updated: List[Employee] = []
+        for emp in employees:
+            dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
+            if dates:
+                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates)))
+            else:
+                updated.append(emp)
+        return updated
+
+    def apply_unavailable_map_to_current_month(
+        self,
+        year: int,
+        month: int,
+        unavailable_map: Dict[str, set[date]],
+    ) -> bool:
+        target = self.result if self.result and self.result.year == year and self.result.month == month else load_schedule_result(year, month)
+        if not target:
+            return False
+        updated = self.merge_unavailable_into_employees(target.employees, unavailable_map)
+        hit = sum(
+            len(unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set())
+            for emp in target.employees
+        )
+        if hit <= 0:
+            return False
+        target.employees = updated
+        self.result = target
+        self.year_spin.setValue(year)
+        self.month_spin.setValue(month)
+        self.employees = list(updated)
+        self.add_employee_rows(self.employees)
+        self.render_schedule_table()
+        self.refresh_validation_and_stats()
+        source_name = f"{year}-{month:02d}"
+        save_unavailable_days(self.employees, source_name)
+        QMessageBox.information(self, "불가일 반영", f"{year}년 {month}월 회색 셀 불가일 {hit}건을 반영했습니다.")
+        return True
 
     def paste_schedule_from_clipboard(self) -> None:
         self.paste_schedule_from_clipboard_for_month(self.year_spin.value(), self.month_spin.value())
