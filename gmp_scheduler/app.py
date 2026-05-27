@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -66,6 +67,7 @@ ID_COL_WIDTH = 58
 DAY_COL_WIDTH = 34
 COMPACT_ROW_HEIGHT = 20
 COMPACT_FONT_SIZE = 8
+HEADER_FONT_SIZE = 10
 
 
 class PasteTableWidget(QTableWidget):
@@ -267,7 +269,8 @@ class MainWindow(QMainWindow):
         self.stats_end_month_spin.setRange(1, 12)
         self.stats_end_month_spin.setValue(date.today().month)
         self.stats_mode_combo = QComboBox()
-        self.stats_mode_combo.addItems(["근무율", "GY/당직", "저장 월"])
+        self.stats_mode_combo.addItems(["월간 통계", "근무율", "GY/당직", "저장 월"])
+        self.stats_mode_combo.currentTextChanged.connect(lambda _text: self.render_cumulative_stats())
         self.calendar_date_edit = QDateEdit()
         self.calendar_date_edit.setCalendarPopup(True)
         today = date.today()
@@ -339,6 +342,39 @@ class MainWindow(QMainWindow):
     def remove_selected_family_day(self) -> None:
         remove_family_day(self.selected_calendar_date())
         self.refresh_calendar_after_override()
+
+    def apply_calendar_override(self, d: date, action: str) -> None:
+        if action == "add_holiday":
+            add_custom_holiday(d)
+        elif action == "remove_holiday":
+            remove_holiday(d)
+        elif action == "add_family":
+            add_custom_family_day(d)
+        elif action == "remove_family":
+            remove_family_day(d)
+        self.refresh_calendar_after_override()
+
+    def show_date_header_menu(self, table: QTableWidget, pos) -> None:
+        col = table.horizontalHeader().logicalIndexAt(pos)
+        if col < 2:
+            return
+        result = getattr(table, "result", None)
+        if not isinstance(result, ScheduleResult):
+            result = self.result
+        if not isinstance(result, ScheduleResult):
+            return
+        dates = month_dates(result.year, result.month)
+        day_index = col - 2
+        if day_index < 0 or day_index >= len(dates):
+            return
+        d = dates[day_index]
+        menu = QMenu(self)
+        menu.addAction(f"{d.isoformat()} 페밀리데이로 설정").triggered.connect(lambda: self.apply_calendar_override(d, "add_family"))
+        menu.addAction("페밀리데이 제외").triggered.connect(lambda: self.apply_calendar_override(d, "remove_family"))
+        menu.addSeparator()
+        menu.addAction("휴일로 설정").triggered.connect(lambda: self.apply_calendar_override(d, "add_holiday"))
+        menu.addAction("휴일 제외").triggered.connect(lambda: self.apply_calendar_override(d, "remove_holiday"))
+        menu.exec(table.horizontalHeader().mapToGlobal(pos))
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("main")
@@ -416,8 +452,6 @@ class MainWindow(QMainWindow):
 
         stats_tab = QWidget()
         stats_layout = QVBoxLayout(stats_tab)
-        stats_layout.addWidget(QLabel("월간 통계"))
-        stats_layout.addWidget(self.month_stats_table)
         period_layout = QHBoxLayout()
         period_layout.addWidget(QLabel("통계"))
         period_layout.addWidget(self.stats_mode_combo)
@@ -435,9 +469,6 @@ class MainWindow(QMainWindow):
         period_layout.addWidget(refresh_cum_btn)
         period_layout.addStretch(1)
         stats_layout.addLayout(period_layout)
-        stats_layout.addWidget(QLabel("DB 저장 월 목록"))
-        stats_layout.addWidget(self.saved_months_table)
-        stats_layout.addWidget(QLabel("선택 기간 누적 통계"))
         stats_layout.addWidget(self.cumulative_stats_table)
         tabs.addTab(stats_tab, "통계")
 
@@ -968,9 +999,9 @@ class MainWindow(QMainWindow):
         header.setStretchLastSection(False)
         header.setMinimumSectionSize(20)
         header_font = header.font()
-        header_font.setPointSize(COMPACT_FONT_SIZE)
+        header_font.setPointSize(HEADER_FONT_SIZE)
         header.setFont(header_font)
-        header.setFixedHeight(32)
+        header.setFixedHeight(36)
 
         table.setColumnWidth(0, NAME_COL_WIDTH)
         table.setColumnWidth(1, ID_COL_WIDTH)
@@ -991,6 +1022,10 @@ class MainWindow(QMainWindow):
         table.setItemDelegate(ShiftComboDelegate(table))
         table.setHorizontalHeaderLabels(["성명", "사번"] + [str(d.day) for d in dates])
         table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        table.horizontalHeader().customContextMenuRequested.connect(
+            lambda pos, t=table: self.show_date_header_menu(t, pos)
+        )
         for col, d in enumerate(dates, start=2):
             item = table.horizontalHeaderItem(col)
             if item and is_holiday_or_weekend(d, result.holidays):
@@ -1061,6 +1096,14 @@ class MainWindow(QMainWindow):
         self.schedule_table.setColumnCount(len(dates) + 2)
         headers = ["성명", "사번"] + [f"{weekday_ko(d)}\n{d.day}" for d in dates]
         self.schedule_table.setHorizontalHeaderLabels(headers)
+        self.schedule_table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        try:
+            self.schedule_table.horizontalHeader().customContextMenuRequested.disconnect()
+        except Exception:
+            pass
+        self.schedule_table.horizontalHeader().customContextMenuRequested.connect(
+            lambda pos: self.show_date_header_menu(self.schedule_table, pos)
+        )
         for col, d in enumerate(dates, start=2):
             if is_holiday_or_weekend(d, self.result.holidays):
                 self.schedule_table.horizontalHeaderItem(col).setBackground(HOLIDAY_HEADER_COLOR)
@@ -1186,11 +1229,13 @@ class MainWindow(QMainWindow):
         if all(actual_count(shift) >= max(1, min_rules.get(shift, 1)) for shift in required):
             item.setForeground(STAFFING_OK_COLOR)
             font = item.font()
+            font.setBold(True)
             font.setItalic(any(actual_count(shift) > max(1, min_rules.get(shift, 1)) for shift in required))
             item.setFont(font)
         else:
             item.setForeground(QColor("#000000"))
             font = item.font()
+            font.setBold(False)
             font.setItalic(False)
             item.setFont(font)
 
@@ -1221,14 +1266,21 @@ class MainWindow(QMainWindow):
     def render_stats(self) -> None:
         if not self.result:
             return
+        if self.stats_mode_combo.currentText() == "월간 통계":
+            self.render_month_stats_as_main()
+
+    def render_month_stats_as_main(self) -> None:
+        if not self.result:
+            return
         dates = month_dates(self.result.year, self.result.month)
         stats = compute_stats(self.result.employees, dates, self.result.schedule, self.result.holidays)
         avg = averages(stats)
         headers = STAT_HEADERS + ["총근무 평균편차"]
-        self.month_stats_table.clear()
-        self.month_stats_table.setColumnCount(len(headers))
-        self.month_stats_table.setRowCount(len(stats))
-        self.month_stats_table.setHorizontalHeaderLabels(headers)
+        table = self.cumulative_stats_table
+        table.clear()
+        table.setColumnCount(len(headers))
+        table.setRowCount(len(stats))
+        table.setHorizontalHeaderLabels(headers)
         for row, stat in enumerate(stats.values()):
             values = stat.as_row() + [round(stat.total_work - avg.get("total_work", 0), 2)]
             for col, value in enumerate(values):
@@ -1236,22 +1288,15 @@ class MainWindow(QMainWindow):
                 item.setTextAlignment(Qt.AlignCenter)
                 if col == len(headers) - 1 and isinstance(value, (int, float)) and abs(value) >= 2:
                     item.setBackground(WARNING_COLOR)
-                self.month_stats_table.setItem(row, col, item)
-        self.month_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.month_stats_table.verticalHeader().setVisible(False)
+                table.setItem(row, col, item)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.verticalHeader().setVisible(False)
 
     def render_cumulative_stats(self) -> None:
         month_rows = saved_months()
-        self.saved_months_table.clear()
-        self.saved_months_table.setColumnCount(5)
-        self.saved_months_table.setHorizontalHeaderLabels(["ID", "연도", "월", "출처", "저장시각"])
-        self.saved_months_table.setRowCount(len(month_rows))
-        for r, row in enumerate(month_rows):
-            for c, key in enumerate(["id", "year", "month", "source_name", "imported_at"]):
-                self.saved_months_table.setItem(r, c, QTableWidgetItem(str(row.get(key, ""))))
-        self.saved_months_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.saved_months_table.verticalHeader().setVisible(False)
-
+        if self.stats_mode_combo.currentText() == "월간 통계":
+            self.render_month_stats_as_main()
+            return
         start_year = self.stats_start_year_spin.value()
         start_month = self.stats_start_month_spin.value()
         end_year = self.stats_end_year_spin.value()
