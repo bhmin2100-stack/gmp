@@ -158,6 +158,9 @@ class MonthRosterTable(PasteTableWidget):
         if event.matches(QKeySequence.Paste):
             self.owner.paste_month_table_clipboard(self)
             return
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.owner.clear_selected_schedule_cells(self, getattr(self, "result", None))
+            return
         super().keyPressEvent(event)
 
     def paste_text(self, text: str) -> None:
@@ -186,6 +189,9 @@ class CurrentMonthRosterTable(PasteTableWidget):
             return
         if event.matches(QKeySequence.Paste):
             self.owner.paste_current_month_clipboard()
+            return
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.owner.clear_selected_schedule_cells(self, self.owner.result)
             return
         super().keyPressEvent(event)
 
@@ -625,6 +631,15 @@ class MainWindow(QMainWindow):
                 year, month = target
                 self.paste_schedule_from_clipboard_for_month(year, month)
                 return True
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            table = self._focus_ancestor(CurrentMonthRosterTable)
+            if table is not None:
+                self.clear_selected_schedule_cells(table, self.result)
+                return True
+            table = self._focus_ancestor(MonthRosterTable)
+            if table is not None:
+                self.clear_selected_schedule_cells(table, getattr(table, "result", None))
+                return True
         return super().eventFilter(watched, event)
 
     def _focus_ancestor(self, cls):
@@ -826,6 +841,48 @@ class MainWindow(QMainWindow):
                 item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
         table.blockSignals(False)
         self.sync_result_from_table(table, result)
+        self.save_result_silently(result)
+        if self.result and self.result.year == result.year and self.result.month == result.month:
+            self.result = result
+            self.employees = list(result.employees)
+            self.render_schedule_table()
+            self.refresh_validation_and_stats()
+        self.render_year_overview()
+
+    def clear_selected_schedule_cells(self, table: QTableWidget, result: Optional[ScheduleResult]) -> None:
+        if not isinstance(result, ScheduleResult):
+            return
+        selected = sorted(
+            {(index.row(), index.column()) for index in table.selectedIndexes() if index.column() >= 2}
+        )
+        if not selected:
+            row = table.currentRow()
+            col = table.currentColumn()
+            if row >= 0 and col >= 2:
+                selected = [(row, col)]
+        if not selected:
+            return
+
+        dates = month_dates(result.year, result.month)
+        table.blockSignals(True)
+        for row, col in selected:
+            if row < 0 or row >= len(result.employees):
+                continue
+            day_index = col - 2
+            if day_index < 0 or day_index >= len(dates):
+                continue
+            emp = result.employees[row]
+            d = dates[day_index]
+            result.schedule.setdefault(d, {})[emp.key] = OFF
+            item = table.item(row, col)
+            if item is None:
+                item = QTableWidgetItem()
+                table.setItem(row, col, item)
+            item.setText("")
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setBackground(SHIFT_COLORS.get(OFF, QColor("#ffffff")))
+        table.blockSignals(False)
+
         self.save_result_silently(result)
         if self.result and self.result.year == result.year and self.result.month == result.month:
             self.result = result
