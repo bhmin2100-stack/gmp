@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates
+from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .schedule_utils import GY_BLOCK_DAYS
 from .validation import validate_schedule
@@ -124,15 +124,23 @@ def generate_month_schedule(
         )
 
     def can_start_gy_block(emp: Employee, start: date) -> bool:
-        for offset in range(GY_BLOCK_DAYS):
-            d = start + timedelta(days=offset)
-            if d not in schedule:
-                continue
+        for d in gy_block_dates(start):
             if d in emp.unavailable_dates:
                 return False
             if schedule[d].get(emp.key, OFF) != OFF:
                 return False
         return True
+
+    def gy_block_dates(start: date) -> List[date]:
+        result: List[date] = []
+        for offset in range(GY_BLOCK_DAYS):
+            d = start + timedelta(days=offset)
+            if d not in schedule:
+                continue
+            if is_duty_day(d):
+                break
+            result.append(d)
+        return result
 
     def assign_gy_block_start(d: date) -> bool:
         candidates = [e for e in employees if can_start_gy_block(e, d)]
@@ -140,23 +148,20 @@ def generate_month_schedule(
             return False
         candidates.sort(key=lambda e: candidate_score(e, d, SHIFT_GY))
         chosen = candidates[0]
-        for offset in range(GY_BLOCK_DAYS):
-            cur = d + timedelta(days=offset)
-            if cur not in schedule:
-                continue
+        for cur in gy_block_dates(d):
             mark_assignment(chosen, cur, SHIFT_GY)
         return True
 
     for d in dates:
-        min_rules = rules.min_holiday if is_holiday_or_weekend(d, holidays) else rules.min_weekday
-        if not has_gy_coverage(d):
+        min_rules = rules.min_holiday if is_duty_day(d) else rules.min_weekday
+        if not is_duty_day(d) and not has_gy_coverage(d):
             assign_gy_block_start(d)
         day_swing_order = [shift for shift in (SHIFT_DAY, SHIFT_SWING) if shift in min_rules]
         for shift in day_swing_order:
             for _ in range(min_rules.get(shift, 0)):
                 assign_one(d, shift)
         if not has_gy_coverage(d):
-            gy_shift = SHIFT_DUTY if SHIFT_DUTY in min_rules else SHIFT_GY
+            gy_shift = SHIFT_DUTY if is_duty_day(d) else SHIFT_GY
             for _ in range(min_rules.get(gy_shift, 1)):
                 assign_one(d, gy_shift)
 

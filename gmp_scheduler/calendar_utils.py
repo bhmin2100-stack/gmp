@@ -55,6 +55,11 @@ def is_weekend(d: date) -> bool:
     return d.weekday() >= 5
 
 
+def is_duty_day(d: date) -> bool:
+    """Saturday-only 당직 rule."""
+    return d.weekday() == 5
+
+
 def is_holiday_or_weekend(d: date, holiday_set: Set[date]) -> bool:
     return is_weekend(d) or d in holiday_set
 

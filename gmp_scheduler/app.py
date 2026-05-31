@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from .calendar_settings import add_custom_family_day, add_custom_holiday, remove_family_day, remove_holiday
-from .calendar_utils import family_days, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
+from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .database import load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
@@ -483,7 +483,7 @@ class MainWindow(QMainWindow):
         weekday_form.addRow("S", self.weekday_sw_spin)
         weekday_form.addRow("G/지근", self.weekday_gy_spin)
 
-        holiday_group = QGroupBox("휴일/주말 최소 인원")
+        holiday_group = QGroupBox("토요일 당직일 최소 인원")
         holiday_form = QFormLayout(holiday_group)
         holiday_form.addRow("D", self.holiday_day_spin)
         holiday_form.addRow("S", self.holiday_sw_spin)
@@ -1368,13 +1368,11 @@ class MainWindow(QMainWindow):
             shift for shift in result.schedule.get(d, {}).values()
             if shift and shift not in (OFF, SHIFT_GY_REST)
         )
-        min_rules = self.rules.min_holiday if is_holiday_or_weekend(d, result.holidays) else self.rules.min_weekday
-        is_holiday = is_holiday_or_weekend(d, result.holidays)
-        required = [SHIFT_DAY, SHIFT_SWING, SHIFT_DUTY if is_holiday else SHIFT_GY]
+        min_rules = self.rules.min_holiday if is_duty_day(d) else self.rules.min_weekday
+        is_duty = is_duty_day(d)
+        required = [SHIFT_DAY, SHIFT_SWING, SHIFT_DUTY if is_duty else SHIFT_GY]
 
         def actual_count(shift: str) -> int:
-            if shift == SHIFT_DUTY:
-                return counts[SHIFT_DUTY] + counts[SHIFT_GY]
             return counts[shift]
 
         if all(actual_count(shift) >= max(1, min_rules.get(shift, 1)) for shift in required):

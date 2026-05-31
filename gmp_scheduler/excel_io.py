@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from .calendar_utils import is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
+from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult
 from .schedule_utils import expand_gy_blocks
 from .stats import STAT_HEADERS, averages, compute_stats
@@ -72,7 +72,7 @@ def normalize_shift_code(value: object, work_date: Optional[date] = None, holida
     if ("G" in upper and ("지근" in text or "지금" in text)) or text in ("지근", "지금", "야간"):
         return SHIFT_GY
     if upper in ("G", "GY"):
-        if work_date and holidays and is_holiday_or_weekend(work_date, holidays):
+        if work_date and is_duty_day(work_date):
             return SHIFT_DUTY
         return SHIFT_GY
     if text in ("당직", "주말당직"):

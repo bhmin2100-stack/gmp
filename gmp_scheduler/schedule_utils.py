@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import List
 
-from .calendar_utils import month_dates
+from .calendar_utils import is_duty_day, month_dates
 from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap
 
 
@@ -44,6 +44,8 @@ def expand_gy_blocks(employees: List[Employee], year: int, month: int, schedule:
                 d = start + timedelta(days=offset)
                 if d not in valid_dates:
                     continue
+                if is_duty_day(d):
+                    break
                 current = schedule.setdefault(d, {}).get(emp.key, OFF)
                 if any(other_key != emp.key for other_key in original_gy_or_duty_by_date.get(d, set())):
                     break

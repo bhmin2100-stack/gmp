@@ -4,7 +4,7 @@ from collections import Counter
 from datetime import date
 from typing import List, Set
 
-from .calendar_utils import is_holiday_or_weekend, month_dates
+from .calendar_utils import is_duty_day, is_holiday_or_weekend, month_dates
 from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ShiftRules
 from .stats import compute_stats
 
@@ -25,11 +25,9 @@ def validate_schedule(
             shift for shift in schedule.get(d, {}).values()
             if shift and shift not in (OFF, SHIFT_GY_REST)
         )
-        min_rules = rules.min_holiday if is_holiday_or_weekend(d, holidays) else rules.min_weekday
+        min_rules = rules.min_holiday if is_duty_day(d) else rules.min_weekday
         for shift, minimum in min_rules.items():
             actual = counts[shift]
-            if shift == SHIFT_DUTY:
-                actual += counts[SHIFT_GY]
             if actual < minimum:
                 warnings.append(f"{d.isoformat()} {shift} 최소 인원 부족: {actual}/{minimum}")
 
@@ -39,8 +37,10 @@ def validate_schedule(
                 continue
             if d in emp.unavailable_dates:
                 warnings.append(f"{d.isoformat()} {emp.name} 불가일 배정 위반: {shift}")
-            if shift == SHIFT_DUTY and not is_holiday_or_weekend(d, holidays):
-                warnings.append(f"{d.isoformat()} {emp.name} 당직은 휴일/주말 GY인데 평일에 배정됨")
+            if shift == SHIFT_DUTY and not is_duty_day(d):
+                warnings.append(f"{d.isoformat()} {emp.name} 당직은 토요일만 배정 가능함")
+            if shift == SHIFT_GY and is_duty_day(d):
+                warnings.append(f"{d.isoformat()} {emp.name} 토요일 GY는 당직으로 입력해야 함")
 
     stats = compute_stats(employees, month_dates(year, month), schedule, holidays)
     for s in stats.values():
