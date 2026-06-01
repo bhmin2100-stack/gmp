@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Set
 
 from .calendar_utils import is_duty_day, is_holiday_or_weekend, month_dates
@@ -30,6 +30,8 @@ def validate_schedule(
             actual = counts[shift]
             if actual < minimum:
                 warnings.append(f"{d.isoformat()} {shift} 최소 인원 부족: {actual}/{minimum}")
+        if counts[SHIFT_DUTY] and counts[SHIFT_GY]:
+            warnings.append(f"{d.isoformat()} 당직일에는 G/지근이 같이 있을 수 없음")
 
         for emp_key, shift in schedule.get(d, {}).items():
             emp = employee_by_key.get(emp_key)
@@ -41,6 +43,9 @@ def validate_schedule(
                 warnings.append(f"{d.isoformat()} {emp.name} 당직은 토요일만 배정 가능함")
             if shift == SHIFT_GY and is_duty_day(d):
                 warnings.append(f"{d.isoformat()} {emp.name} 토요일 GY는 당직으로 입력해야 함")
+            prev_day = d - timedelta(days=1)
+            if shift == SHIFT_GY and schedule.get(prev_day, {}).get(emp_key, OFF) == SHIFT_DUTY:
+                warnings.append(f"{d.isoformat()} {emp.name} 당직 다음날 같은 사람이 G/지근 시작됨")
 
     stats = compute_stats(employees, month_dates(year, month), schedule, holidays)
     for s in stats.values():

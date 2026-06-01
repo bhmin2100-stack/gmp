@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 
 from .calendar_settings import add_custom_family_day, add_custom_holiday, remove_family_day, remove_holiday
 from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
-from .database import load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
+from .database import delete_month_schedule, load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .schedule_utils import expand_gy_blocks
@@ -1086,6 +1086,10 @@ class MainWindow(QMainWindow):
                 self.year_spin.value(),
                 self.month_spin.value(),
                 self.rules,
+                previous_day_duty_employee_keys=self.previous_month_last_duty_keys(
+                    self.year_spin.value(),
+                    self.month_spin.value(),
+                ),
             )
         except ScheduleError as exc:
             QMessageBox.warning(self, "생성 실패", str(exc))
@@ -1206,11 +1210,45 @@ class MainWindow(QMainWindow):
                     schedule = {d: {} for d in month_dates(year, month)}
                     result = ScheduleResult(year, month, employees, schedule, korean_holidays(year))
                     status = "미저장"
+                title_row = QHBoxLayout()
                 title = QLabel(f"{year}년 {month}월 · {status}")
                 title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
-                self.year_scroll_layout.addWidget(title)
+                clear_btn = QPushButton("이 달 초기화")
+                clear_btn.setFixedWidth(95)
+                clear_btn.clicked.connect(lambda _checked=False, y=year, m=month: self.clear_month_schedule(y, m))
+                title_row.addWidget(title)
+                title_row.addStretch(1)
+                title_row.addWidget(clear_btn)
+                self.year_scroll_layout.addLayout(title_row)
                 self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
         self.year_scroll_layout.addStretch(1)
+
+    def clear_month_schedule(self, year: int, month: int) -> None:
+        answer = QMessageBox.question(
+            self,
+            "월 근무표 초기화",
+            f"{year}년 {month}월 저장 근무표와 불가일을 삭제할까요?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        deleted = delete_month_schedule(year, month)
+        if self.result and self.result.year == year and self.result.month == month:
+            self.result = ScheduleResult(
+                year,
+                month,
+                [],
+                {d: {} for d in month_dates(year, month)},
+                korean_holidays(year),
+            )
+            self.employees = []
+            self.add_employee_rows([])
+            self.render_schedule_table()
+            self.refresh_validation_and_stats()
+        self.render_cumulative_stats()
+        self.render_year_overview()
+        QMessageBox.information(self, "초기화 완료", f"{year}년 {month}월 근무표를 초기화했습니다. 삭제된 저장본: {deleted}개")
 
     def render_schedule_table(self) -> None:
         if not self.result:
@@ -1312,6 +1350,7 @@ class MainWindow(QMainWindow):
                 result.schedule[dates[day_index]][emp.key] = OFF
         expand_gy_blocks(result.employees, result.year, result.month, result.schedule)
         self.apply_previous_month_gy_carryover(result, carryover_counts)
+        self.enforce_duty_day_without_gy(result)
 
     def previous_month_gy_carryover_counts(self, result: ScheduleResult) -> Dict[str, int]:
         prev_year = result.year if result.month > 1 else result.year - 1
@@ -1324,6 +1363,7 @@ class MainWindow(QMainWindow):
         previous_last = previous_dates[-1]
         employee_keys = {emp.key for emp in result.employees}
         carryover_counts: Dict[str, int] = {}
+        current_date_set = set(current_dates)
         for emp in previous.employees:
             if emp.key not in employee_keys:
                 continue
@@ -1333,8 +1373,17 @@ class MainWindow(QMainWindow):
                 prev_day = d - timedelta(days=1)
                 if prev_day in previous.schedule and previous.schedule.get(prev_day, {}).get(emp.key, OFF) == SHIFT_GY:
                     continue
-                block_end = d + timedelta(days=5)
-                overflow = (block_end - previous_last).days
+                overflow = 0
+                for offset in range(1, 6):
+                    cur = d + timedelta(days=offset)
+                    if is_duty_day(cur):
+                        break
+                    if cur in previous.schedule and any(
+                        shift == SHIFT_DUTY for shift in previous.schedule.get(cur, {}).values()
+                    ):
+                        break
+                    if cur in current_date_set:
+                        overflow += 1
                 if overflow <= 0:
                     continue
                 carryover_counts[emp.key] = max(
@@ -1353,7 +1402,54 @@ class MainWindow(QMainWindow):
         for emp in result.employees:
             count = min(counts.get(emp.key, 0), len(current_dates))
             for day_index in range(count):
-                result.schedule[current_dates[day_index]][emp.key] = SHIFT_GY
+                d = current_dates[day_index]
+                if not is_duty_day(d):
+                    result.schedule[d][emp.key] = SHIFT_GY
+        self.enforce_month_start_after_previous_duty(result)
+        self.enforce_duty_day_without_gy(result)
+
+    def previous_month_last_duty_keys(self, year: int, month: int) -> set[str]:
+        prev_year = year if month > 1 else year - 1
+        prev_month = month - 1 if month > 1 else 12
+        previous = load_schedule_result(prev_year, prev_month)
+        if not previous:
+            return set()
+        previous_last = month_dates(prev_year, prev_month)[-1]
+        if previous_last + timedelta(days=1) != month_dates(year, month)[0]:
+            return set()
+        return {
+            emp.key
+            for emp in previous.employees
+            if previous.schedule.get(previous_last, {}).get(emp.key, OFF) == SHIFT_DUTY
+        }
+
+    def enforce_month_start_after_previous_duty(self, result: ScheduleResult) -> None:
+        current_dates = month_dates(result.year, result.month)
+        if not current_dates:
+            return
+        first_day = current_dates[0]
+        blocked_keys = self.previous_month_last_duty_keys(result.year, result.month)
+        if not blocked_keys:
+            return
+        for emp in result.employees:
+            if emp.key not in blocked_keys:
+                continue
+            for d in current_dates:
+                if is_duty_day(d):
+                    break
+                if result.schedule.get(d, {}).get(emp.key, OFF) != SHIFT_GY:
+                    break
+                result.schedule[d][emp.key] = OFF
+
+    @staticmethod
+    def enforce_duty_day_without_gy(result: ScheduleResult) -> None:
+        for d in month_dates(result.year, result.month):
+            day_map = result.schedule.get(d, {})
+            if not any(shift == SHIFT_DUTY for shift in day_map.values()):
+                continue
+            for emp in result.employees:
+                if day_map.get(emp.key, OFF) == SHIFT_GY:
+                    day_map[emp.key] = OFF
 
     def sync_schedule_from_table(self) -> None:
         if not self.result:

@@ -110,6 +110,26 @@ def save_schedule(result: ScheduleResult, source_name: str = "") -> int:
         return schedule_id
 
 
+def delete_month_schedule(year: int, month: int) -> int:
+    """Delete saved schedules and unavailable marks for a month."""
+    start_date = month_dates(year, month)[0].isoformat()
+    end_date = month_dates(year, month)[-1].isoformat()
+    with connect() as conn:
+        schedule_rows = conn.execute(
+            "SELECT id FROM monthly_schedules WHERE year=? AND month=?",
+            (year, month),
+        ).fetchall()
+        schedule_ids = [int(row["id"]) for row in schedule_rows]
+        for schedule_id in schedule_ids:
+            conn.execute("DELETE FROM assignments WHERE schedule_id=?", (schedule_id,))
+        conn.execute("DELETE FROM monthly_schedules WHERE year=? AND month=?", (year, month))
+        conn.execute(
+            "DELETE FROM unavailable_days WHERE work_date BETWEEN ? AND ?",
+            (start_date, end_date),
+        )
+        return len(schedule_ids)
+
+
 def save_unavailable_days(employees: List[Employee], source_name: str = "") -> int:
     count = 0
     with connect() as conn:

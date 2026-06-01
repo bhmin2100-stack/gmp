@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
@@ -21,6 +21,7 @@ def generate_month_schedule(
     month: int,
     rules: Optional[ShiftRules] = None,
     seed: Optional[int] = None,
+    previous_day_duty_employee_keys: Optional[Set[str]] = None,
 ) -> ScheduleResult:
     if not employees:
         raise ScheduleError("직원이 없습니다.")
@@ -30,6 +31,7 @@ def generate_month_schedule(
     holidays = korean_holidays(year)
     schedule: ScheduleMap = {d: {e.key: OFF for e in employees} for d in dates}
     counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    previous_day_duty_employee_keys = previous_day_duty_employee_keys or set()
 
     def bucket(d: date, shift: str) -> str:
         prefix = "holiday" if is_holiday_or_weekend(d, holidays) else "weekday"
@@ -143,7 +145,14 @@ def generate_month_schedule(
         return result
 
     def assign_gy_block_start(d: date) -> bool:
-        candidates = [e for e in employees if can_start_gy_block(e, d)]
+        blocked_keys = {
+            emp.key
+            for emp in employees
+            if schedule.get(d - timedelta(days=1), {}).get(emp.key, OFF) == SHIFT_DUTY
+        }
+        if d == dates[0]:
+            blocked_keys |= previous_day_duty_employee_keys
+        candidates = [e for e in employees if e.key not in blocked_keys and can_start_gy_block(e, d)]
         if not candidates:
             return False
         candidates.sort(key=lambda e: candidate_score(e, d, SHIFT_GY))
