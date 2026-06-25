@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QDate, QEvent, Qt
+from PySide6.QtCore import QDate, QEvent, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 from .calendar_settings import add_custom_family_day, add_custom_holiday, remove_family_day, remove_holiday
 from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .database import delete_month_schedule, load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
-from .excel_io import export_schedule_to_excel, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_schedule_from_clipboard, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard
+from .excel_io import export_schedule_to_excel, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_html_table, parse_schedule_from_clipboard, parse_schedule_from_html_rows, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard, parse_unavailable_from_html_rows
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
@@ -229,6 +229,7 @@ class MainWindow(QMainWindow):
         self.result: Optional[ScheduleResult] = None
         self.rules = ShiftRules()
         self._updating_table = False
+        self._year_overview_refresh_pending = False
 
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2100)
@@ -678,13 +679,17 @@ class MainWindow(QMainWindow):
             return
         self.sync_rules_from_widgets()
         unavailable_map: Dict[str, set[date]] = {}
-        if html.strip():
+        html_rows = parse_html_table(html) if html.strip() else []
+        if html_rows:
             try:
-                unavailable_map = parse_unavailable_from_clipboard(text, html, year, month)
+                unavailable_map = parse_unavailable_from_html_rows(html_rows, year, month)
             except Exception:
                 unavailable_map = {}
         try:
-            pasted = parse_schedule_from_clipboard(text, html, year, month, self.rules)
+            if html_rows:
+                pasted = parse_schedule_from_html_rows(html_rows, year, month, self.rules)
+            else:
+                pasted = parse_schedule_from_clipboard(text, html, year, month, self.rules)
         except Exception as exc:
             if unavailable_map and self.apply_unavailable_map_to_current_month(year, month, unavailable_map):
                 return
@@ -709,7 +714,7 @@ class MainWindow(QMainWindow):
             self.render_cumulative_stats()
         except Exception as exc:
             QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
-        self.render_year_overview()
+        self.schedule_year_overview_refresh()
         QMessageBox.information(self, "근무표 반영", f"{year}년 {month}월 표에서 {len(self.employees)}명을 인식했고 DB에 자동 저장했습니다.")
 
     @staticmethod
@@ -781,7 +786,7 @@ class MainWindow(QMainWindow):
             self.render_cumulative_stats()
         except Exception as exc:
             QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
-        self.render_year_overview()
+        self.schedule_year_overview_refresh()
         QMessageBox.information(self, "근무표 반영", f"{source_label}에서 {len(self.employees)}명을 인식했고 DB에 자동 저장했습니다.")
 
     def import_schedule_excel(self) -> None:
@@ -847,7 +852,7 @@ class MainWindow(QMainWindow):
             self.employees = list(result.employees)
             self.render_schedule_table()
             self.refresh_validation_and_stats()
-        self.render_year_overview()
+        self.schedule_year_overview_refresh()
 
     def clear_selected_schedule_cells(self, table: QTableWidget, result: Optional[ScheduleResult]) -> None:
         if not isinstance(result, ScheduleResult):
@@ -889,7 +894,7 @@ class MainWindow(QMainWindow):
             self.employees = list(result.employees)
             self.render_schedule_table()
             self.refresh_validation_and_stats()
-        self.render_year_overview()
+        self.schedule_year_overview_refresh()
 
     def save_result_silently(self, result: ScheduleResult) -> None:
         save_schedule(result, f"{result.year}-{result.month:02d}")
@@ -1048,7 +1053,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "DB 저장 실패", str(exc))
             return
         self.render_cumulative_stats()
-        self.render_year_overview()
+        self.schedule_year_overview_refresh()
         QMessageBox.information(self, "DB 저장 완료", f"근무표를 DB에 저장했습니다. ID: {schedule_id}")
 
     def export_excel(self) -> None:
@@ -1096,7 +1101,7 @@ class MainWindow(QMainWindow):
             return
         self.render_schedule_table()
         self.refresh_validation_and_stats()
-        self.render_year_overview()
+        self.schedule_year_overview_refresh()
 
     def _clear_layout(self, layout: QVBoxLayout) -> None:
         while layout.count():
@@ -1223,6 +1228,18 @@ class MainWindow(QMainWindow):
                 self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
         self.year_scroll_layout.addStretch(1)
 
+    def schedule_year_overview_refresh(self) -> None:
+        """Refresh the annual view after the current UI event returns."""
+        if self._year_overview_refresh_pending:
+            return
+        self._year_overview_refresh_pending = True
+
+        def refresh() -> None:
+            self._year_overview_refresh_pending = False
+            self.render_year_overview()
+
+        QTimer.singleShot(0, refresh)
+
     def clear_month_schedule(self, year: int, month: int) -> None:
         answer = QMessageBox.question(
             self,
@@ -1247,7 +1264,7 @@ class MainWindow(QMainWindow):
             self.render_schedule_table()
             self.refresh_validation_and_stats()
         self.render_cumulative_stats()
-        self.render_year_overview()
+        self.schedule_year_overview_refresh()
         QMessageBox.information(self, "초기화 완료", f"{year}년 {month}월 근무표를 초기화했습니다. 삭제된 저장본: {deleted}개")
 
     def render_schedule_table(self) -> None:
@@ -1331,7 +1348,7 @@ class MainWindow(QMainWindow):
             self.result = result
             self.render_schedule_table()
             self.refresh_validation_and_stats()
-        self.render_year_overview()
+        self.schedule_year_overview_refresh()
 
     @staticmethod
     def normalize_shift(text: str) -> str:

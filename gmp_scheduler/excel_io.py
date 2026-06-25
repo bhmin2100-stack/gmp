@@ -272,9 +272,13 @@ def _rows_to_schedule_matrix(rows: List[List[dict]]) -> List[List[str]]:
 def parse_schedule_from_clipboard(text: str, html: str, year: int, month: int, rules: Optional[ShiftRules] = None) -> ScheduleResult:
     html_rows = parse_html_table(html)
     if html_rows:
-        tsv = "\n".join("\t".join(row) for row in _rows_to_schedule_matrix(html_rows))
-        return parse_schedule_from_tsv(tsv, year, month, rules)
+        return parse_schedule_from_html_rows(html_rows, year, month, rules)
     return parse_schedule_from_tsv(text, year, month, rules)
+
+
+def parse_schedule_from_html_rows(rows: List[List[dict]], year: int, month: int, rules: Optional[ShiftRules] = None) -> ScheduleResult:
+    tsv = "\n".join("\t".join(row) for row in _rows_to_schedule_matrix(rows))
+    return parse_schedule_from_tsv(tsv, year, month, rules)
 
 
 def parse_unavailable_from_clipboard(text: str, html: str, year: int, month: int) -> Dict[str, Set[date]]:
@@ -282,7 +286,10 @@ def parse_unavailable_from_clipboard(text: str, html: str, year: int, month: int
     if not html_rows:
         raise ValueError("클립보드에 셀 색상 정보가 없습니다. 엑셀에서 범위를 복사한 뒤 바로 붙여넣으세요.")
 
-    rows = html_rows
+    return parse_unavailable_from_html_rows(html_rows, year, month)
+
+
+def parse_unavailable_from_html_rows(rows: List[List[dict]], year: int, month: int) -> Dict[str, Set[date]]:
     header_index = 0
     name_col = 0
     id_col = 1
