@@ -407,6 +407,75 @@ def parse_unavailable_from_html_rows(rows: List[List[dict]], year: int, month: i
             result[name] = dates
     return result
 
+
+def gray_cell_offsets_from_html_rows(rows: List[List[dict]]) -> Set[tuple[int, int]]:
+    """Return row/column offsets for gray-filled HTML cells.
+
+    This supports clipboard ranges that contain only date cells, without the
+    roster name/id columns needed by parse_unavailable_from_html_rows.
+    """
+    result: Set[tuple[int, int]] = set()
+    for row_index, row in enumerate(rows):
+        for col_index, cell in enumerate(row):
+            if is_gray_rgb(_cell_color_from_html_cell(cell)):
+                result.add((row_index, col_index))
+    return result
+
+
+def parse_unavailable_from_html_rows_by_position(
+    rows: List[List[dict]],
+    employees: List[Employee],
+    year: int,
+    month: int,
+) -> Dict[str, Set[date]]:
+    """Infer unavailable dates from gray cells by roster row/column position.
+
+    Full-roster clipboard HTML can vary enough that name/id header matching may
+    fail even though the schedule parser can still read the pasted roster. This
+    fallback aligns gray cells to the parsed employee order and the date header
+    columns.
+    """
+    valid_dates = {d.day: d for d in month_dates(year, month)}
+    day_cols: Dict[int, int] = {}
+    header_index: Optional[int] = None
+    for idx, row in enumerate(rows[:8]):
+        candidate: Dict[int, int] = {}
+        for col, cell in enumerate(row):
+            day = _header_day(cell.get("text", ""))
+            if day in valid_dates:
+                candidate[day] = col
+        if len(candidate) >= max(1, len(valid_dates) - 1):
+            header_index = idx
+            day_cols = candidate
+            break
+    if not day_cols:
+        for offset, d in enumerate(month_dates(year, month), start=2):
+            day_cols[d.day] = offset
+
+    data_start = (header_index + 1) if header_index is not None else 0
+    result: Dict[str, Set[date]] = {}
+    employee_index = 0
+    for row in rows[data_start:]:
+        if employee_index >= len(employees):
+            break
+        # Weekday rows under the date header usually have no name/id cells.
+        name_text = str(row[0].get("text", "")).strip() if row else ""
+        id_text = str(row[1].get("text", "")).strip() if len(row) > 1 else ""
+        if header_index is not None and not name_text and not id_text:
+            continue
+        emp = employees[employee_index]
+        dates: Set[date] = set()
+        for day, col in day_cols.items():
+            if col < len(row) and is_gray_rgb(_cell_color_from_html_cell(row[col])):
+                dates.add(valid_dates[day])
+        if dates:
+            result[emp.key] = dates
+            if emp.employee_id:
+                result[emp.employee_id] = dates
+            result[emp.name] = dates
+        employee_index += 1
+    return result
+
 def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[ShiftRules] = None) -> ScheduleResult:
     rows = [[cell.strip() for cell in line.split("\t")] for line in text.splitlines() if line.strip()]
     if not rows:
@@ -430,6 +499,16 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
 
     valid_dates = {d.day: d for d in month_dates(year, month)}
     valid_days = set(valid_dates)
+
+    if header_index is None:
+        for idx, row in enumerate(rows[:8]):
+            header_days = {_header_day(cell) for cell in row}
+            header_days.discard(None)
+            if len(header_days & valid_days) >= max(1, len(valid_days) - 1):
+                header_index = idx
+                name_col = 0
+                id_col = 1
+                break
 
     if header_index is not None:
         header = rows[header_index]
@@ -718,7 +797,7 @@ def export_schedule_to_excel(result: ScheduleResult, path: str | Path) -> None:
             shift = result.schedule.get(d, {}).get(emp.key, OFF)
             cell = ws.cell(row=row_idx, column=col_idx, value=shift)
             cell.alignment = Alignment(horizontal="center")
-            fill = UNAVAILABLE_FILL if shift == OFF and d in emp.unavailable_dates else SHIFT_FILLS.get(shift, "FFFFFF")
+            fill = UNAVAILABLE_FILL if d in emp.unavailable_dates else SHIFT_FILLS.get(shift, "FFFFFF")
             cell.fill = PatternFill("solid", fgColor=fill)
             cell.border = border
 

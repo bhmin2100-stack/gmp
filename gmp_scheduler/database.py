@@ -13,6 +13,14 @@ from .stats import EmployeeStats, compute_stats
 DB_PATH = Path("gmp_scheduler.sqlite3")
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc_value, traceback))
+        finally:
+            self.close()
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS employees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +64,7 @@ CREATE TABLE IF NOT EXISTS unavailable_days (
 
 
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
@@ -157,13 +165,36 @@ def delete_month_schedule(year: int, month: int, source_name: Optional[str] = No
         return len(schedule_ids)
 
 
-def save_unavailable_days(employees: List[Employee], source_name: str = "") -> int:
+def save_unavailable_days(
+    employees: List[Employee],
+    source_name: str = "",
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+) -> int:
     count = 0
     with connect() as conn:
         imported_at = datetime.now().isoformat(timespec="seconds")
+        emp_ids = {emp.key: upsert_employee(conn, emp) for emp in employees}
+        if year is not None and month is not None:
+            start_date = month_dates(year, month)[0].isoformat()
+            end_date = month_dates(year, month)[-1].isoformat()
+            delete_source_names = [source_name]
+            if source_name and source_name not in {"V11", "V12"}:
+                delete_source_names.append("")
+            source_placeholders = ",".join("?" for _ in delete_source_names)
+            for emp_id in emp_ids.values():
+                conn.execute(
+                    f"""
+                    DELETE FROM unavailable_days
+                    WHERE employee_id=? AND work_date BETWEEN ? AND ? AND source_name IN ({source_placeholders})
+                    """,
+                    (emp_id, start_date, end_date, *delete_source_names),
+                )
         for emp in employees:
-            emp_id = upsert_employee(conn, emp)
+            emp_id = emp_ids[emp.key]
             for d in emp.unavailable_dates:
+                if year is not None and month is not None and (d.year != year or d.month != month):
+                    continue
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO unavailable_days(employee_id, work_date, source_name, imported_at)
@@ -173,6 +204,10 @@ def save_unavailable_days(employees: List[Employee], source_name: str = "") -> i
                 )
                 count += 1
     return count
+
+
+def replace_employee_unavailable_days(emp: Employee, year: int, month: int, source_name: str = "") -> int:
+    return save_unavailable_days([emp], source_name, year, month)
 
 
 def cumulative_stats(
@@ -327,6 +362,7 @@ def load_schedule_result(
         if not rows:
             return None
 
+        selected_source_name = str(sched["source_name"] or "")
         employee_ids_by_key: Dict[str, int] = {}
         employee_meta_by_key: Dict[str, tuple[str, str, bool, str]] = {}
         for row in rows:
@@ -338,6 +374,10 @@ def load_schedule_result(
         unavailable_by_key: Dict[str, Set[date]] = {key: set() for key in employee_meta_by_key}
         if employee_ids_by_key:
             placeholders = ",".join("?" for _ in employee_ids_by_key)
+            source_names = [selected_source_name]
+            if selected_source_name and selected_source_name not in {"V11", "V12"}:
+                source_names.append("")
+            source_placeholders = ",".join("?" for _ in source_names)
             start_date = month_dates(year, month)[0].isoformat()
             end_date = month_dates(year, month)[-1].isoformat()
             unavailable_rows = conn.execute(
@@ -346,8 +386,9 @@ def load_schedule_result(
                 FROM unavailable_days
                 WHERE employee_id IN ({placeholders})
                   AND work_date BETWEEN ? AND ?
+                  AND source_name IN ({source_placeholders})
                 """,
-                (*employee_ids_by_key.values(), start_date, end_date),
+                (*employee_ids_by_key.values(), start_date, end_date, *source_names),
             ).fetchall()
             key_by_employee_id = {employee_id: key for key, employee_id in employee_ids_by_key.items()}
             for unavailable_row in unavailable_rows:
@@ -364,4 +405,4 @@ def load_schedule_result(
             emp_key = f"{row['name']}|{row['employee_no'] or ''}"
             if d in schedule:
                 schedule[d][emp_key] = str(row["shift_code"] or OFF)
-        return ScheduleResult(year, month, employees, schedule, korean_holidays(year), source_name=str(sched["source_name"] or ""))
+        return ScheduleResult(year, month, employees, schedule, korean_holidays(year), source_name=selected_source_name)
