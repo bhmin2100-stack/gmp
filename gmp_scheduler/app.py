@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import re
-import json
 from collections import Counter
 from datetime import date, timedelta
 from html import escape
@@ -14,7 +13,6 @@ from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
-    QCheckBox,
     QComboBox,
     QDateEdit,
     QFileDialog,
@@ -73,13 +71,13 @@ DAY_COL_WIDTH = 34
 COMPACT_ROW_HEIGHT = 20
 COMPACT_FONT_SIZE = 8
 HEADER_FONT_SIZE = 10
-TEAM_SPLIT_SETTINGS_PATH = Path("team_split_settings.json")
 VIEW_LEGACY = "legacy"
 VIEW_V11 = "V11"
 VIEW_V12 = "V12"
 TEAM_VIEWS = (VIEW_V11, VIEW_V12)
 LEGACY_LABEL = "기존"
 LOCKED_SPLIT_COLOR = QColor("#f3f3f3")
+TEAM_SPLIT_START_DATE = date(2026, 8, 1)
 
 
 class PasteTableWidget(QTableWidget):
@@ -243,7 +241,6 @@ class MainWindow(QMainWindow):
         self._year_overview_dirty = True
         self._cumulative_stats_dirty = True
         self._suppress_month_reload = False
-        self._loading_split_controls = False
         self._schedule_header_menu_connected = False
 
         self.year_spin = QSpinBox()
@@ -253,20 +250,7 @@ class MainWindow(QMainWindow):
         self.month_spin.setRange(1, 12)
         self.month_spin.setValue(date.today().month)
 
-        self.split_enabled_check = QCheckBox("V11/V12 분할 사용")
-        default_split_year, default_split_month = self.default_split_start_month()
-        self.split_start_year_spin = QSpinBox()
-        self.split_start_year_spin.setRange(2020, 2100)
-        self.split_start_year_spin.setValue(default_split_year)
-        self.split_start_month_spin = QSpinBox()
-        self.split_start_month_spin.setRange(1, 12)
-        self.split_start_month_spin.setValue(default_split_month)
-        self.schedule_view_combo = QComboBox()
-        self.schedule_view_combo.addItem("기존", VIEW_LEGACY)
-        self.schedule_view_combo.addItem("V11", VIEW_V11)
-        self.schedule_view_combo.addItem("V12", VIEW_V12)
         self.schedule_source_label = QLabel("")
-        self.load_team_split_settings_into_controls()
 
         self._build_rule_widgets()
 
@@ -289,6 +273,12 @@ class MainWindow(QMainWindow):
             | QAbstractItemView.AnyKeyPressed
         )
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
+        self.month_split_scroll = QScrollArea()
+        self.month_split_scroll.setWidgetResizable(True)
+        self.month_split_content = QWidget()
+        self.month_split_layout = QVBoxLayout(self.month_split_content)
+        self.month_split_scroll.setWidget(self.month_split_content)
+        self.month_split_scroll.hide()
 
         self.month_stats_table = QTableWidget()
         self.cumulative_stats_table = QTableWidget()
@@ -325,10 +315,6 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.year_spin.valueChanged.connect(lambda _value: self.load_selected_month_from_db())
         self.month_spin.valueChanged.connect(lambda _value: self.load_selected_month_from_db())
-        self.split_enabled_check.toggled.connect(lambda _checked: self.on_team_split_controls_changed())
-        self.split_start_year_spin.valueChanged.connect(lambda _value: self.on_team_split_controls_changed())
-        self.split_start_month_spin.valueChanged.connect(lambda _value: self.on_team_split_controls_changed())
-        self.schedule_view_combo.currentIndexChanged.connect(lambda _index: self.on_team_split_controls_changed())
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
@@ -343,75 +329,14 @@ class MainWindow(QMainWindow):
     def is_team_source(source_name: str) -> bool:
         return source_name in TEAM_VIEWS
 
-    @staticmethod
-    def default_split_start_month() -> tuple[int, int]:
-        today = date.today()
-        if today.month < 12:
-            return today.year, today.month + 1
-        return today.year + 1, 1
-
-    def load_team_split_settings_into_controls(self) -> None:
-        self._loading_split_controls = True
-        try:
-            settings: Dict[str, object] = {}
-            if TEAM_SPLIT_SETTINGS_PATH.exists():
-                try:
-                    settings = json.loads(TEAM_SPLIT_SETTINGS_PATH.read_text(encoding="utf-8"))
-                except Exception:
-                    settings = {}
-            enabled = bool(settings.get("enabled", False))
-            default_year, default_month = self.default_split_start_month()
-
-            def int_setting(key: str, default: int) -> int:
-                try:
-                    return int(settings.get(key) or default)
-                except (TypeError, ValueError):
-                    return default
-
-            split_year = int_setting("split_start_year", default_year)
-            split_month = int_setting("split_start_month", default_month)
-            if "split_date" in settings and "split_start_year" not in settings:
-                try:
-                    old_split_date = date.fromisoformat(str(settings.get("split_date")))
-                    split_year = old_split_date.year
-                    split_month = old_split_date.month
-                except ValueError:
-                    pass
-            split_month = min(12, max(1, split_month))
-            view = str(settings.get("view") or VIEW_LEGACY)
-            if view not in (VIEW_LEGACY, *TEAM_VIEWS):
-                view = VIEW_LEGACY
-
-            self.split_enabled_check.setChecked(enabled)
-            self.split_start_year_spin.setValue(split_year)
-            self.split_start_month_spin.setValue(split_month)
-            index = self.schedule_view_combo.findData(view)
-            self.schedule_view_combo.setCurrentIndex(max(0, index))
-        finally:
-            self._loading_split_controls = False
-
-    def save_team_split_settings(self) -> None:
-        split_date = self.split_date()
-        settings = {
-            "enabled": self.split_enabled_check.isChecked(),
-            "split_start_year": split_date.year,
-            "split_start_month": split_date.month,
-            "split_date": split_date.isoformat(),
-            "view": self.selected_schedule_view(),
-        }
-        TEAM_SPLIT_SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
-
     def selected_schedule_view(self) -> str:
-        value = self.schedule_view_combo.currentData()
-        if value in (VIEW_LEGACY, *TEAM_VIEWS):
-            return str(value)
         return VIEW_LEGACY
 
     def split_date(self) -> date:
-        return date(self.split_start_year_spin.value(), self.split_start_month_spin.value(), 1)
+        return TEAM_SPLIT_START_DATE
 
     def enabled_split_date(self) -> Optional[date]:
-        return self.split_date() if self.split_enabled_check.isChecked() else None
+        return self.split_date()
 
     def month_has_team_dates(self, year: int, month: int) -> bool:
         split = self.enabled_split_date()
@@ -429,7 +354,7 @@ class MainWindow(QMainWindow):
             split = self.enabled_split_date()
             dates = month_dates(year, month)
             if split and dates[0] < split <= dates[-1]:
-                return f"{source_name} (시작월 전 기존 표시)"
+                return f"{source_name} (2026-08 전 기존 표시)"
             return source_name
         return LEGACY_LABEL
 
@@ -439,10 +364,10 @@ class MainWindow(QMainWindow):
         year = self.year_spin.value()
         month = self.month_spin.value()
         label = self.source_label_for_view(year, month)
-        if self.split_enabled_check.isChecked():
-            self.schedule_source_label.setText(f"보기/저장: {label} · 시작월 {self.split_date():%Y-%m}")
+        if self.month_has_team_dates(year, month):
+            self.schedule_source_label.setText(f"보기: V11 위 / V12 아래 · 기준 {self.split_date():%Y-%m}")
         else:
-            self.schedule_source_label.setText(f"보기/저장: {label} · 분할 미사용")
+            self.schedule_source_label.setText(f"보기/저장: {label} · V11/V12는 {self.split_date():%Y-%m}부터")
 
     def set_current_month(self, year: int, month: int) -> None:
         self._suppress_month_reload = True
@@ -589,15 +514,6 @@ class MainWindow(QMainWindow):
         if refresh_overview:
             self.mark_year_overview_dirty()
 
-    def on_team_split_controls_changed(self) -> None:
-        if self._loading_split_controls:
-            return
-        self.save_team_split_settings()
-        self.update_schedule_source_status()
-        self.load_selected_month_from_db(refresh_overview=False)
-        self.mark_cumulative_stats_dirty()
-        self.mark_year_overview_dirty()
-
     def on_tab_changed(self, index: int) -> None:
         if index == getattr(self, "year_tab_index", -1) and self._year_overview_dirty:
             self.schedule_year_overview_refresh()
@@ -708,14 +624,6 @@ class MainWindow(QMainWindow):
         top.addWidget(self.year_spin)
         top.addWidget(QLabel("월"))
         top.addWidget(self.month_spin)
-        top.addWidget(self.split_enabled_check)
-        top.addWidget(QLabel("시작월"))
-        top.addWidget(self.split_start_year_spin)
-        top.addWidget(QLabel("년"))
-        top.addWidget(self.split_start_month_spin)
-        top.addWidget(QLabel("월"))
-        top.addWidget(QLabel("보기"))
-        top.addWidget(self.schedule_view_combo)
         top.addWidget(self.schedule_source_label)
         generate_btn = QPushButton("자동 생성")
         generate_btn.clicked.connect(self.generate_schedule)
@@ -754,6 +662,7 @@ class MainWindow(QMainWindow):
         schedule_layout = QVBoxLayout(schedule_tab)
         schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 이 표 아무 셀에 커서를 두고 Ctrl+V 하세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
         schedule_layout.addWidget(self.schedule_table)
+        schedule_layout.addWidget(self.month_split_scroll)
         self.schedule_tab_index = tabs.addTab(schedule_tab, "월간 근무표")
 
         stats_tab = QWidget()
@@ -980,7 +889,7 @@ class MainWindow(QMainWindow):
         # 이름+사번+표시들, 또는 이름+표시들 형태면 전체 근무표로 본다.
         return max_cols >= 3 or normalize_shift_code(second) in SHIFT_OPTIONS
 
-    def paste_schedule_from_clipboard_for_month(self, year: int, month: int) -> None:
+    def paste_schedule_from_clipboard_for_month(self, year: int, month: int, source_name: Optional[str] = None) -> None:
         text, html = self._clipboard_text_html()
         if not text.strip() and not html.strip():
             QMessageBox.warning(self, "붙여넣기 실패", "클립보드가 비어 있습니다. 엑셀에서 표 범위를 먼저 복사하세요.")
@@ -999,18 +908,18 @@ class MainWindow(QMainWindow):
             else:
                 pasted = parse_schedule_from_clipboard(text, html, year, month, self.rules)
         except Exception as exc:
-            if unavailable_map and self.apply_unavailable_map_to_current_month(year, month, unavailable_map):
+            if unavailable_map and self.apply_unavailable_map_to_current_month(year, month, unavailable_map, source_name):
                 return
             QMessageBox.warning(self, "붙여넣기 실패", f"{year}년 {month}월 근무표를 읽지 못했습니다.\n{exc}")
             return
 
         if unavailable_map:
             pasted.employees = self.merge_unavailable_into_employees(pasted.employees, unavailable_map)
-            if not self.result_has_work_marks(pasted) and self.apply_unavailable_map_to_current_month(year, month, unavailable_map):
+            if not self.result_has_work_marks(pasted) and self.apply_unavailable_map_to_current_month(year, month, unavailable_map, source_name):
                 return
 
         self.set_current_month(year, month)
-        pasted.source_name = self.source_name_for_view(year, month)
+        pasted.source_name = source_name or self.source_name_for_view(year, month)
         self.apply_split_legacy_prefix(pasted)
         self.result = pasted
         self.apply_previous_month_gy_carryover(self.result)
@@ -1055,12 +964,13 @@ class MainWindow(QMainWindow):
         year: int,
         month: int,
         unavailable_map: Dict[str, set[date]],
+        source_name: Optional[str] = None,
     ) -> bool:
-        source_name = self.source_name_for_view(year, month)
-        if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == source_name:
+        target_source = source_name or self.source_name_for_view(year, month)
+        if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == target_source:
             target = self.result
         else:
-            target = self.load_schedule_for_view(year, month)
+            target = self.load_schedule_for_view(year, month, target_source if self.is_team_source(target_source) else None)
         if not target:
             return False
         updated = self.merge_unavailable_into_employees(target.employees, unavailable_map)
@@ -1082,6 +992,9 @@ class MainWindow(QMainWindow):
         return True
 
     def paste_schedule_from_clipboard(self) -> None:
+        if self.month_has_team_dates(self.year_spin.value(), self.month_spin.value()):
+            QMessageBox.information(self, "붙여넣기 대상 선택", "V11 또는 V12 표 안을 클릭한 뒤 Ctrl+V로 붙여넣으세요.")
+            return
         self.paste_schedule_from_clipboard_for_month(self.year_spin.value(), self.month_spin.value())
 
     def apply_imported_schedule(self, result: ScheduleResult, source_label: str) -> None:
@@ -1128,7 +1041,9 @@ class MainWindow(QMainWindow):
 
     def paste_month_table_clipboard(self, table: MonthRosterTable) -> None:
         if self.clipboard_looks_like_full_roster():
-            self.paste_schedule_from_clipboard_for_month(table.year, table.month)
+            result = getattr(table, "result", None)
+            source_name = result.source_name if isinstance(result, ScheduleResult) else None
+            self.paste_schedule_from_clipboard_for_month(table.year, table.month, source_name)
             return
         result = getattr(table, "result", None)
         if not isinstance(result, ScheduleResult):
@@ -1529,7 +1444,7 @@ class MainWindow(QMainWindow):
                 elif is_holiday_or_weekend(d, result.holidays):
                     item.setBackground(HOLIDAY_HEADER_COLOR)
                 if self.is_locked_split_cell(result, d):
-                    item.setToolTip("분할 시작월 전 기존 근무표입니다.")
+                    item.setToolTip("2026-08 전 기존 근무표입니다.")
             self.apply_staffing_header_style(table, result, col, d)
         if not result.employees:
             hint = QTableWidgetItem("여기에 클릭 후 Ctrl+V")
@@ -1554,7 +1469,7 @@ class MainWindow(QMainWindow):
                     self.apply_schedule_cell_background(cell, result, emp, d, shift)
                     if self.is_locked_split_cell(result, d):
                         cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                        cell.setToolTip("분할 시작월 전 기존 근무표입니다.")
+                        cell.setToolTip("2026-08 전 기존 근무표입니다.")
                     else:
                         cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                     table.setItem(row, col, cell)
@@ -1573,6 +1488,28 @@ class MainWindow(QMainWindow):
             year_title.setStyleSheet("font-size: 20px; font-weight: 800; margin-top: 20px;")
             self.year_scroll_layout.addWidget(year_title)
             for month in range(1, 13):
+                if self.month_has_team_dates(year, month):
+                    title = QLabel(f"{year}년 {month}월 · V11/V12")
+                    title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
+                    self.year_scroll_layout.addWidget(title)
+                    for team in TEAM_VIEWS:
+                        source_name = self.source_name_for_view(year, month, team)
+                        loaded = self.load_existing_schedule_for_source(year, month, source_name)
+                        if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == source_name:
+                            result = self.result
+                            status = "현재 편집 중"
+                        elif loaded:
+                            result = loaded
+                            status = "DB 저장됨"
+                        else:
+                            result = self.load_schedule_for_view(year, month, team)
+                            status = "기존 복사본" if result.employees else "미작성"
+                        self.apply_split_legacy_prefix(result)
+                        team_title = QLabel(f"{team} · {status}")
+                        team_title.setStyleSheet("font-size: 13px; font-weight: 700; margin-top: 4px;")
+                        self.year_scroll_layout.addWidget(team_title)
+                        self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
+                    continue
                 source_name = self.source_name_for_view(year, month)
                 loaded = self.load_existing_schedule_for_source(year, month, source_name)
                 if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == source_name:
@@ -1634,11 +1571,37 @@ class MainWindow(QMainWindow):
         self.mark_year_overview_dirty()
         QMessageBox.information(self, "초기화 완료", f"{year}년 {month}월 {source_label} 근무표를 초기화했습니다. 삭제된 저장본: {deleted}개")
 
+    def render_split_month_tables(self, year: int, month: int) -> None:
+        self._clear_layout(self.month_split_layout)
+        for team in TEAM_VIEWS:
+            result = self.result if (
+                self.result
+                and self.result.year == year
+                and self.result.month == month
+                and self.storage_source_name(self.result) == team
+            ) else self.load_schedule_for_view(year, month, team)
+            self.apply_previous_month_gy_carryover(result)
+            self.apply_split_legacy_prefix(result)
+
+            title = QLabel(team)
+            title.setStyleSheet("font-size: 16px; font-weight: 800; margin-top: 10px;")
+            self.month_split_layout.addWidget(title)
+            self.month_split_layout.addWidget(self._make_schedule_view_table(result))
+        self.month_split_layout.addStretch(1)
+
     def render_schedule_table(self) -> None:
         if not self.result:
             return
         self._updating_table = True
         dates = month_dates(self.result.year, self.result.month)
+        if self.month_has_team_dates(self.result.year, self.result.month):
+            self.schedule_table.hide()
+            self.month_split_scroll.show()
+            self.render_split_month_tables(self.result.year, self.result.month)
+            self._updating_table = False
+            return
+        self.month_split_scroll.hide()
+        self.schedule_table.show()
         self.schedule_table.clear()
         self.schedule_table.setRowCount(len(self.result.employees))
         self.schedule_table.setColumnCount(len(dates) + 2)
@@ -1658,7 +1621,7 @@ class MainWindow(QMainWindow):
                 elif is_holiday_or_weekend(d, self.result.holidays):
                     item.setBackground(HOLIDAY_HEADER_COLOR)
                 if self.is_locked_split_cell(self.result, d):
-                    item.setToolTip("분할 시작월 전 기존 근무표입니다.")
+                    item.setToolTip("2026-08 전 기존 근무표입니다.")
             self.apply_staffing_header_style(self.schedule_table, self.result, col, d)
         for row, emp in enumerate(self.result.employees):
             name_item = QTableWidgetItem(emp.name)
@@ -1675,7 +1638,7 @@ class MainWindow(QMainWindow):
                 self.apply_schedule_cell_background(item, self.result, emp, d, shift)
                 if self.is_locked_split_cell(self.result, d):
                     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                    item.setToolTip("분할 시작월 전 기존 근무표입니다.")
+                    item.setToolTip("2026-08 전 기존 근무표입니다.")
                 else:
                     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                 self.schedule_table.setItem(row, col, item)
@@ -1945,6 +1908,8 @@ class MainWindow(QMainWindow):
 
     def refresh_schedule_header_styles(self) -> None:
         if not self.result:
+            return
+        if self.schedule_table.isHidden():
             return
         dates = month_dates(self.result.year, self.result.month)
         for col, d in enumerate(dates, start=2):
@@ -2306,6 +2271,8 @@ class MainWindow(QMainWindow):
 
     def paint_validation_errors(self) -> None:
         if not self.result:
+            return
+        if self.schedule_table.isHidden():
             return
         dates = month_dates(self.result.year, self.result.month)
         employee_by_key = {e.key: e for e in self.result.employees}
