@@ -68,6 +68,10 @@ def normalize_shift_code(value: object, work_date: Optional[date] = None, holida
     if not text:
         return OFF
     upper = text.upper()
+    if upper in ("휴OFF", "휴OFF.", "휴오프"):
+        return SHIFT_DAY
+    if upper in ("평S", "평SW", "평SWING"):
+        return SHIFT_SWING
     if upper in ("D", "DAY", "데이"):
         return SHIFT_DAY
     if upper in ("S", "SW", "SWING", "스윙"):

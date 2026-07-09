@@ -7,7 +7,7 @@ from typing import Dict
 from .models import ShiftRules
 
 RULE_SETTINGS_PATH = Path("rule_settings.json")
-TEAM_RULE_KEYS = ("V11", "V12")
+TEAM_RULE_KEYS = ("combined", "V11", "V12")
 
 
 def rules_to_dict(rules: ShiftRules) -> Dict[str, object]:

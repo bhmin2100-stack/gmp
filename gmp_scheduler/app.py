@@ -84,6 +84,12 @@ VIEW_LEGACY = "legacy"
 VIEW_V11 = "V11"
 VIEW_V12 = "V12"
 TEAM_VIEWS = (VIEW_V11, VIEW_V12)
+RULE_COMBINED = "combined"
+RULE_SETTING_OPTIONS = (
+    (RULE_COMBINED, "V11/12 통합"),
+    (VIEW_V11, "V11만"),
+    (VIEW_V12, "V12만"),
+)
 LEGACY_LABEL = "기존"
 LOCKED_SPLIT_COLOR = QColor("#f3f3f3")
 TEAM_SPLIT_START_DATE = date(2026, 8, 1)
@@ -246,7 +252,7 @@ class MainWindow(QMainWindow):
         self.employees: List[Employee] = []
         self.result: Optional[ScheduleResult] = None
         self.team_rules = load_team_rules()
-        self.rule_settings_source = VIEW_V11
+        self.rule_settings_source = RULE_COMBINED
         self.rules = self.team_rules[self.rule_settings_source]
         self.module_names = load_modules()
         self.is_admin = False
@@ -312,6 +318,10 @@ class MainWindow(QMainWindow):
         self.create_schedule_btn.setStyleSheet("font-weight: 700; padding: 8px;")
         self.create_schedule_btn.clicked.connect(self.create_missing_schedule_for_current_page)
         self.create_schedule_btn.hide()
+        self.regenerate_schedule_btn = QPushButton("근무표 재생성")
+        self.regenerate_schedule_btn.setStyleSheet("font-weight: 700; padding: 8px;")
+        self.regenerate_schedule_btn.clicked.connect(self.regenerate_schedule_for_current_page)
+        self.regenerate_schedule_btn.hide()
         self.seed_employees_btn = QPushButton("인원 반영")
         self.seed_employees_btn.setStyleSheet("font-weight: 700; padding: 8px;")
         self.seed_employees_btn.clicked.connect(self.seed_employees_for_current_page)
@@ -910,21 +920,21 @@ class MainWindow(QMainWindow):
     def active_rule_settings_source(self) -> str:
         if hasattr(self, "rule_source_combo"):
             value = self.rule_source_combo.currentData()
-            if value in TEAM_VIEWS:
+            if value in self.team_rules:
                 return str(value)
         return self.rule_settings_source
 
     def rules_for_source(self, source_name: str) -> ShiftRules:
         if source_name in TEAM_VIEWS:
             return self.team_rules[source_name]
-        return self.team_rules[VIEW_V11]
+        return self.team_rules[RULE_COMBINED]
 
     def current_result_rules(self, result: Optional[ScheduleResult] = None) -> ShiftRules:
         target = result or self.result
         if isinstance(target, ScheduleResult):
             source_name = self.storage_source_name(target)
         else:
-            source_name = self.current_roster_source_name() if hasattr(self, "year_spin") else VIEW_V11
+            source_name = self.current_roster_source_name() if hasattr(self, "year_spin") else RULE_COMBINED
         return self.rules_for_source(source_name)
 
     def populate_rule_widgets(self, source_name: str) -> None:
@@ -1086,11 +1096,13 @@ class MainWindow(QMainWindow):
         schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 이 표 아무 셀에 커서를 두고 Ctrl+V 하세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
         schedule_layout.addWidget(self.seed_employees_btn)
         schedule_layout.addWidget(self.create_schedule_btn)
+        schedule_layout.addWidget(self.regenerate_schedule_btn)
         schedule_layout.addWidget(self.schedule_table)
         schedule_layout.addWidget(self.month_split_scroll)
         if hasattr(self, "admin_only_widgets"):
             self.admin_only_widgets.append(self.seed_employees_btn)
             self.admin_only_widgets.append(self.create_schedule_btn)
+            self.admin_only_widgets.append(self.regenerate_schedule_btn)
 
         stats_tab = QWidget()
         stats_layout = QVBoxLayout(stats_tab)
@@ -1128,8 +1140,8 @@ class MainWindow(QMainWindow):
         rule_source_row = QHBoxLayout()
         rule_source_row.addWidget(QLabel("설정 대상"))
         self.rule_source_combo = QComboBox()
-        for team in TEAM_VIEWS:
-            self.rule_source_combo.addItem(team, team)
+        for key, label in RULE_SETTING_OPTIONS:
+            self.rule_source_combo.addItem(label, key)
         self.rule_source_combo.setCurrentIndex(0)
         self.rule_source_combo.currentIndexChanged.connect(lambda _index: self.on_rule_source_changed())
         rule_source_row.addWidget(self.rule_source_combo)
@@ -1386,7 +1398,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "붙여넣기 실패", "클립보드가 비어 있습니다. 엑셀에서 표 범위를 먼저 복사하세요.")
             return
         target_source = source_name or self.current_roster_source_name()
-        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
+        rules = self.sync_rules_from_widgets(source_name=target_source)
         unavailable_map: Dict[str, set[date]] = {}
         html_rows = parse_html_table(html) if html.strip() else []
         if html_rows:
@@ -1476,20 +1488,29 @@ class MainWindow(QMainWindow):
             self.create_schedule_btn.hide()
             if hasattr(self, "seed_employees_btn"):
                 self.seed_employees_btn.hide()
+            if hasattr(self, "regenerate_schedule_btn"):
+                self.regenerate_schedule_btn.hide()
             return
         target_source = source_name or self.storage_source_name(result)
         should_show = self.should_offer_schedule_generation(result, target_source)
+        should_regenerate = self.result_has_work_marks(result)
         if self.is_team_source(target_source):
             self.create_schedule_btn.setText(f"{target_source} 근무표 생성")
             if hasattr(self, "seed_employees_btn"):
                 self.seed_employees_btn.setText(f"{target_source} 인원 반영")
+            if hasattr(self, "regenerate_schedule_btn"):
+                self.regenerate_schedule_btn.setText(f"{target_source} 근무표 재생성")
         else:
             self.create_schedule_btn.setText("근무표 생성")
             if hasattr(self, "seed_employees_btn"):
                 self.seed_employees_btn.setText("인원 반영")
+            if hasattr(self, "regenerate_schedule_btn"):
+                self.regenerate_schedule_btn.setText("근무표 재생성")
         self.create_schedule_btn.setVisible(should_show)
         if hasattr(self, "seed_employees_btn"):
             self.seed_employees_btn.setVisible(should_show)
+        if hasattr(self, "regenerate_schedule_btn"):
+            self.regenerate_schedule_btn.setVisible(should_regenerate)
 
     def seed_employees_from_previous_schedule(self, year: int, month: int, source_name: str) -> List[Employee]:
         seed_year = year
@@ -1511,7 +1532,7 @@ class MainWindow(QMainWindow):
 
     def generation_rules_message(self, source_name: Optional[str] = None) -> str:
         target_source = source_name or self.current_roster_source_name()
-        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
+        rules = self.sync_rules_from_widgets(source_name=target_source)
         rule_lines = []
         for day_type in DAY_TYPE_ORDER:
             day_rules = rules.min_by_day_type.get(day_type, {})
@@ -1546,11 +1567,37 @@ class MainWindow(QMainWindow):
         source_name = self.current_roster_source_name()
         self.generate_schedule(source_name=source_name)
 
+    def regenerate_schedule_for_current_page(self) -> None:
+        source_name = self.current_roster_source_name()
+        self.regenerate_schedule_for_month_source(self.year_spin.value(), self.month_spin.value(), source_name)
+
     def seed_employees_for_current_page(self) -> None:
         source_name = self.current_roster_source_name()
         self.create_empty_roster_from_previous(self.year_spin.value(), self.month_spin.value(), source_name)
 
     def create_schedule_for_month_source(self, year: int, month: int, source_name: str) -> None:
+        view = source_name if self.is_team_source(source_name) else None
+        self.set_current_month(year, month)
+        self.result = self.load_schedule_for_view(year, month, view)
+        self.apply_previous_month_gy_carryover(self.result)
+        self.apply_split_legacy_prefix(self.result)
+        self.employees = list(self.result.employees)
+        self.add_employee_rows(self.employees)
+        self.generate_schedule(source_name=source_name)
+
+    def regenerate_schedule_for_month_source(self, year: int, month: int, source_name: str) -> None:
+        if not self.require_admin("근무표 재생성"):
+            return
+        label = self.source_label_for_view(year, month, source_name if self.is_team_source(source_name) else None)
+        answer = QMessageBox.question(
+            self,
+            "근무표 재생성",
+            f"{year}년 {month}월 {label} 기존 근무표를 다시 생성할까요?\n현재 근무 배정은 새 자동 생성 결과로 덮어씁니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
         view = source_name if self.is_team_source(source_name) else None
         self.set_current_month(year, month)
         self.result = self.load_schedule_for_view(year, month, view)
@@ -1566,6 +1613,15 @@ class MainWindow(QMainWindow):
         button.setEnabled(getattr(self, "is_admin", True))
         button.clicked.connect(
             lambda _checked=False, y=year, m=month, s=source_name: self.create_schedule_for_month_source(y, m, s)
+        )
+        return button
+
+    def make_schedule_regenerate_button(self, year: int, month: int, source_name: str) -> QPushButton:
+        button = QPushButton("근무표 재생성")
+        button.setFixedWidth(115)
+        button.setEnabled(getattr(self, "is_admin", True))
+        button.clicked.connect(
+            lambda _checked=False, y=year, m=month, s=source_name: self.regenerate_schedule_for_month_source(y, m, s)
         )
         return button
 
@@ -1771,7 +1827,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         target_source = self.current_roster_source_name()
-        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
+        rules = self.sync_rules_from_widgets(source_name=target_source)
         try:
             imported = import_schedule_from_excel(path, self.year_spin.value(), self.month_spin.value(), rules)
         except Exception as exc:
@@ -2268,7 +2324,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "붙여넣기 실패", "붙여넣은 표가 비어 있습니다.")
             return
         target_source = self.current_roster_source_name()
-        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
+        rules = self.sync_rules_from_widgets(source_name=target_source)
         try:
             self.result = parse_schedule_from_tsv(text, self.year_spin.value(), self.month_spin.value(), rules)
         except Exception as exc:
@@ -2342,7 +2398,7 @@ class MainWindow(QMainWindow):
         target_source = source_name or self.current_roster_source_name()
         if confirm_rules and not self.confirm_generation_rules(target_source):
             return
-        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
+        rules = self.sync_rules_from_widgets(source_name=target_source)
         self.employees = self.collect_employees()
         if not self.employees and self.result:
             self.employees = list(self.result.employees)
@@ -2546,6 +2602,8 @@ class MainWindow(QMainWindow):
             if self.should_offer_schedule_generation(result, source_name):
                 title_row.addWidget(self.make_seed_employees_button(year, month, source_name))
                 title_row.addWidget(self.make_schedule_generate_button(year, month, source_name))
+            if self.result_has_work_marks(result):
+                title_row.addWidget(self.make_schedule_regenerate_button(year, month, source_name))
             if clearable:
                 clear_btn = QPushButton("이 달 초기화")
                 clear_btn.setFixedWidth(95)
@@ -3490,15 +3548,27 @@ class MainWindow(QMainWindow):
         if high <= low:
             if high <= 0:
                 return QColor("#ffffff")
-            strength = 1.0
+            ratio = 1.0
         else:
-            strength = min(1.0, max(0.0, (value - low) / (high - low)))
-        base = (255, 255, 255)
-        target = (244, 204, 204)
-        mix = 0.15 + 0.85 * strength
-        r = round(base[0] * (1 - mix) + target[0] * mix)
-        g = round(base[1] * (1 - mix) + target[1] * mix)
-        b = round(base[2] * (1 - mix) + target[2] * mix)
+            ratio = min(1.0, max(0.0, (value - low) / (high - low)))
+        stops = [
+            (0.0, (74, 144, 226)),
+            (0.33, (80, 200, 120)),
+            (0.66, (255, 224, 102)),
+            (1.0, (244, 76, 76)),
+        ]
+        left = stops[0]
+        right = stops[-1]
+        for index in range(len(stops) - 1):
+            if stops[index][0] <= ratio <= stops[index + 1][0]:
+                left = stops[index]
+                right = stops[index + 1]
+                break
+        span = max(right[0] - left[0], 0.000001)
+        local = (ratio - left[0]) / span
+        r = round(left[1][0] * (1 - local) + right[1][0] * local)
+        g = round(left[1][1] * (1 - local) + right[1][1] * local)
+        b = round(left[1][2] * (1 - local) + right[1][2] * local)
         return QColor(r, g, b)
 
     def render_warnings(self) -> None:
