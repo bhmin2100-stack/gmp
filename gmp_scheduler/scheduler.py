@@ -32,12 +32,24 @@ def generate_month_schedule(
     schedule: ScheduleMap = {d: {e.key: OFF for e in employees} for d in dates}
     counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     previous_day_duty_employee_keys = previous_day_duty_employee_keys or set()
+    week_dates: Dict[date, List[date]] = defaultdict(list)
+    for d in dates:
+        week_dates[d - timedelta(days=d.weekday())].append(d)
 
     def bucket(d: date, shift: str) -> str:
         prefix = "holiday" if is_holiday_or_weekend(d, holidays) else "weekday"
         if shift == SHIFT_DUTY:
             return "holiday_GY"
         return f"{prefix}_{shift}"
+
+    def week_bucket(d: date) -> str:
+        start = d - timedelta(days=d.weekday())
+        return f"week_{start.isoformat()}"
+
+    def weekly_work_target(emp: Employee, d: date) -> int:
+        week_start = d - timedelta(days=d.weekday())
+        available_days = sum(1 for cur in week_dates[week_start] if cur not in emp.unavailable_dates)
+        return min(rules.min_weekly_work_days, available_days)
 
     def prev_shift(emp: Employee, d: date) -> str:
         return schedule.get(d - timedelta(days=1), {}).get(emp.key, OFF)
@@ -78,6 +90,12 @@ def generate_month_schedule(
         score += counts[emp.key][b] * 16
         score += counts[emp.key][shift] * 4
         score += counts[emp.key]["total"] * 1.2
+        weekly_count = counts[emp.key][week_bucket(d)]
+        weekly_target = weekly_work_target(emp, d)
+        if weekly_count < weekly_target:
+            score -= (weekly_target - weekly_count) * 28
+        else:
+            score += (weekly_count - weekly_target + 1) * 14
 
         cw = consecutive_work_before(emp, d)
         cgy = consecutive_gy_before(emp, d)
@@ -103,6 +121,7 @@ def generate_month_schedule(
         schedule[d][emp.key] = shift
         counts[emp.key][shift] += 1
         counts[emp.key][bucket(d, shift)] += 1
+        counts[emp.key][week_bucket(d)] += 1
         counts[emp.key]["total"] += 1
         if is_holiday_or_weekend(d, holidays):
             counts[emp.key]["holiday_work"] += 1

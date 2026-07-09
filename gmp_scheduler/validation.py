@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date, timedelta
-from typing import List, Set
+from typing import Dict, List, Set
 
 from .calendar_utils import is_duty_day, is_holiday_or_weekend, month_dates
 from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ShiftRules
@@ -53,6 +53,32 @@ def validate_schedule(
             warnings.append(f"{s.name} 최대 연속근무 초과: {s.max_consecutive_work}/{rules.max_consecutive_work_days}")
         if s.max_consecutive_gy > rules.max_consecutive_gy:
             warnings.append(f"{s.name} 연속 GY 초과: {s.max_consecutive_gy}/{rules.max_consecutive_gy}")
+
+    dates_by_week: Dict[date, List[date]] = defaultdict(list)
+    for d in month_dates(year, month):
+        dates_by_week[d - timedelta(days=d.weekday())].append(d)
+    for week_start, week_dates in dates_by_week.items():
+        weekly_targets: Dict[str, int] = {}
+        weekly_counts: Dict[str, int] = {}
+        for emp in employees:
+            available_days = sum(1 for d in week_dates if d not in emp.unavailable_dates)
+            target = min(rules.min_weekly_work_days, available_days)
+            assigned = sum(
+                1
+                for d in week_dates
+                if schedule.get(d, {}).get(emp.key, OFF) not in (OFF, SHIFT_GY_REST)
+            )
+            weekly_targets[emp.key] = target
+            weekly_counts[emp.key] = assigned
+        if sum(weekly_counts.values()) < sum(weekly_targets.values()):
+            continue
+        for emp in employees:
+            target = weekly_targets[emp.key]
+            assigned = weekly_counts[emp.key]
+            if target > 0 and assigned < target:
+                warnings.append(
+                    f"{week_start.isoformat()} 주 {emp.name} 주간 최소 근무 부족: {assigned}/{target}"
+                )
 
     for emp in employees:
         if not emp.is_new:

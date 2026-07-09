@@ -1087,6 +1087,7 @@ class MainWindow(QMainWindow):
             f"- 최대 연속 근무: {self.rules.max_consecutive_work_days}일\n"
             f"- 최대 연속 G/당직: {self.rules.max_consecutive_gy}일\n"
             "- 직원별 불가일은 근무 배정에서 제외합니다.\n"
+            f"- 직원별 근무 가능일을 기준으로 주 {self.rules.min_weekly_work_days}회 이상 배정을 우선합니다.\n"
             "- 전월 말 당직 이월 규칙을 반영합니다.\n\n"
             "확인을 누르면 바로 생성하고 DB에 자동 저장합니다."
         )
