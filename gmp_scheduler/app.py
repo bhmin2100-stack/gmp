@@ -48,7 +48,7 @@ from .calendar_settings import add_custom_family_day, add_custom_holiday, remove
 from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .database import delete_month_schedule, load_schedule_result, period_assignment_rows, replace_employee_unavailable_days, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, gray_cell_offsets_from_html_rows, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_html_table, parse_schedule_from_clipboard, parse_schedule_from_html_rows, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard, parse_unavailable_from_html_rows, parse_unavailable_from_html_rows_by_position
-from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
+from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .module_settings import load_modules, save_modules
 from .rule_settings import load_team_rules, save_team_rules
 from .rule_utils import min_rules_for_date, rule_value_for_display, set_rule_value_from_display
@@ -2239,6 +2239,15 @@ class MainWindow(QMainWindow):
         if len(self.employees) < 3:
             QMessageBox.warning(self, "생성 불가", "D/S/G 최소 인원을 채우려면 직원이 최소 3명 필요합니다.")
             return
+        initial_result = ScheduleResult(
+            year,
+            month,
+            list(self.employees),
+            {d: {emp.key: OFF for emp in self.employees} for d in month_dates(year, month)},
+            korean_holidays(year),
+            source_name=target_source,
+        )
+        initial_schedule = self.previous_month_gy_initial_schedule(initial_result)
         try:
             self.result = generate_month_schedule(
                 self.employees,
@@ -2250,6 +2259,7 @@ class MainWindow(QMainWindow):
                     month,
                     target_source,
                 ),
+                initial_schedule=initial_schedule,
             )
         except ScheduleError as exc:
             QMessageBox.warning(self, "생성 실패", str(exc))
@@ -2768,6 +2778,19 @@ class MainWindow(QMainWindow):
                     result.schedule[d][emp.key] = SHIFT_GY
         self.enforce_month_start_after_previous_duty(result)
         self.enforce_duty_day_without_gy(result)
+
+    def previous_month_gy_initial_schedule(self, result: ScheduleResult) -> ScheduleMap:
+        carryover_counts = self.previous_month_gy_carryover_counts(result)
+        current_dates = month_dates(result.year, result.month)
+        initial: ScheduleMap = {}
+        for emp in result.employees:
+            count = min(carryover_counts.get(emp.key, 0), len(current_dates))
+            for day_index in range(count):
+                d = current_dates[day_index]
+                if self.is_locked_split_cell(result, d) or is_duty_day(d):
+                    continue
+                initial.setdefault(d, {})[emp.key] = SHIFT_GY
+        return initial
 
     def previous_month_last_duty_keys(self, year: int, month: int, source_name: Optional[str] = None) -> set[str]:
         prev_year = year if month > 1 else year - 1

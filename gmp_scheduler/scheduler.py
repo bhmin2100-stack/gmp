@@ -23,6 +23,7 @@ def generate_month_schedule(
     rules: Optional[ShiftRules] = None,
     seed: Optional[int] = None,
     previous_day_duty_employee_keys: Optional[Set[str]] = None,
+    initial_schedule: Optional[ScheduleMap] = None,
 ) -> ScheduleResult:
     if not employees:
         raise ScheduleError("직원이 없습니다.")
@@ -126,6 +127,19 @@ def generate_month_schedule(
         counts[emp.key]["total"] += 1
         if is_holiday_or_weekend(d, holidays):
             counts[emp.key]["holiday_work"] += 1
+
+    if initial_schedule:
+        employee_by_key = {emp.key: emp for emp in employees}
+        for d, day_map in initial_schedule.items():
+            if d not in schedule:
+                continue
+            for emp_key, shift in day_map.items():
+                if shift in (OFF, SHIFT_GY_REST, ""):
+                    continue
+                emp = employee_by_key.get(emp_key)
+                if emp is None:
+                    continue
+                mark_assignment(emp, d, shift)
 
     def assign_one(d: date, shift: str) -> bool:
         candidates = [
