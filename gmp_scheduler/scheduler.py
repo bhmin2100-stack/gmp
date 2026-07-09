@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
-from .rule_utils import min_rules_for_date
+from .rule_utils import day_shift_key_for_date, min_rules_for_date
 from .schedule_utils import GY_BLOCK_DAYS
 from .validation import validate_schedule
 
@@ -86,12 +86,27 @@ def generate_month_schedule(
             return -14
         return 0
 
+    def module_weight_percent(emp: Employee, d: date, shift: str) -> int:
+        if not emp.module:
+            return 0
+        try:
+            return max(0, int(rules.module_weights.get(emp.module, {}).get(day_shift_key_for_date(d, holidays, shift), 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def weighted_count(raw_count: int, percent: int) -> float:
+        if percent <= 0:
+            return float(raw_count)
+        return raw_count / (1.0 + percent / 100.0)
+
     def candidate_score(emp: Employee, d: date, shift: str) -> Tuple[float, float]:
         b = bucket(d, shift)
+        weight_percent = module_weight_percent(emp, d, shift)
         score = 0.0
-        score += counts[emp.key][b] * 16
-        score += counts[emp.key][shift] * 4
+        score += weighted_count(counts[emp.key][b], weight_percent) * 16
+        score += weighted_count(counts[emp.key][shift], weight_percent) * 4
         score += counts[emp.key]["total"] * 1.2
+        score -= weight_percent * 0.16
         weekly_count = counts[emp.key][week_bucket(d)]
         weekly_target = weekly_work_target(emp, d)
         if weekly_count < weekly_target:

@@ -30,6 +30,18 @@ def day_type_for_date(d: date, holidays: Set[date]) -> str:
     return DAY_TYPE_WEEKDAY
 
 
+def stored_shift_for_day_type(day_type: str, shift: str) -> str:
+    return SHIFT_DUTY if day_type == DAY_TYPE_SATURDAY and shift == SHIFT_GY else shift
+
+
+def day_shift_key(day_type: str, shift: str) -> str:
+    return f"{day_type}:{stored_shift_for_day_type(day_type, shift)}"
+
+
+def day_shift_key_for_date(d: date, holidays: Set[date], shift: str) -> str:
+    return f"{day_type_for_date(d, holidays)}:{shift}"
+
+
 def min_rules_for_date(rules: ShiftRules, d: date, holidays: Set[date]) -> Dict[str, int]:
     day_type = day_type_for_date(d, holidays)
     configured = dict(rules.min_by_day_type.get(day_type, {}))
@@ -47,10 +59,10 @@ def min_rules_for_date(rules: ShiftRules, d: date, holidays: Set[date]) -> Dict[
 
 
 def rule_value_for_display(rules: ShiftRules, day_type: str, shift: str) -> int:
-    stored_shift = SHIFT_DUTY if day_type == DAY_TYPE_SATURDAY and shift == SHIFT_GY else shift
+    stored_shift = stored_shift_for_day_type(day_type, shift)
     return rules.min_by_day_type.get(day_type, {}).get(stored_shift, 0)
 
 
 def set_rule_value_from_display(rules: ShiftRules, day_type: str, shift: str, value: int) -> None:
-    stored_shift = SHIFT_DUTY if day_type == DAY_TYPE_SATURDAY and shift == SHIFT_GY else shift
+    stored_shift = stored_shift_for_day_type(day_type, shift)
     rules.min_by_day_type.setdefault(day_type, {})[stored_shift] = value

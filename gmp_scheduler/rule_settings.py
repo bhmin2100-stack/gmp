@@ -11,6 +11,20 @@ TEAM_RULE_KEYS = ("combined", "V11", "V12")
 
 
 def rules_to_dict(rules: ShiftRules) -> Dict[str, object]:
+    module_weights: Dict[str, Dict[str, int]] = {}
+    for module_name, weights in rules.module_weights.items():
+        if not module_name or not isinstance(weights, dict):
+            continue
+        cleaned: Dict[str, int] = {}
+        for key, percent in weights.items():
+            try:
+                value = int(percent)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                cleaned[str(key)] = value
+        if cleaned:
+            module_weights[str(module_name)] = cleaned
     return {
         "min_weekday": dict(rules.min_weekday),
         "min_holiday": dict(rules.min_holiday),
@@ -22,6 +36,7 @@ def rules_to_dict(rules: ShiftRules) -> Dict[str, object]:
         "max_consecutive_gy": rules.max_consecutive_gy,
         "min_weekly_work_days": rules.min_weekly_work_days,
         "allow_same_day_multiple_shift": rules.allow_same_day_multiple_shift,
+        "module_weights": module_weights,
     }
 
 
@@ -45,6 +60,22 @@ def rules_from_dict(data: object) -> ShiftRules:
             setattr(rules, attr, value)
     if isinstance(data.get("allow_same_day_multiple_shift"), bool):
         rules.allow_same_day_multiple_shift = data["allow_same_day_multiple_shift"]
+    if isinstance(data.get("module_weights"), dict):
+        module_weights: Dict[str, Dict[str, int]] = {}
+        for module_name, weights in data["module_weights"].items():
+            if not isinstance(weights, dict):
+                continue
+            cleaned: Dict[str, int] = {}
+            for key, value in weights.items():
+                try:
+                    percent = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if percent > 0:
+                    cleaned[str(key)] = percent
+            if cleaned:
+                module_weights[str(module_name)] = cleaned
+        rules.module_weights = module_weights
     return rules
 
 

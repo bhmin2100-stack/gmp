@@ -92,6 +92,7 @@ class ShiftRules:
     max_consecutive_gy: int = 6
     min_weekly_work_days: int = 2
     allow_same_day_multiple_shift: bool = False
+    module_weights: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass

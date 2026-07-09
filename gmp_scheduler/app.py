@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -34,7 +33,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
-    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -46,12 +44,12 @@ from PySide6.QtWidgets import (
 
 from .calendar_settings import add_custom_family_day, add_custom_holiday, remove_family_day, remove_holiday
 from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
-from .database import delete_month_schedule, load_schedule_result, period_assignment_rows, replace_employee_unavailable_days, save_schedule, save_unavailable_days, saved_months
+from .database import delete_month_schedule, load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, gray_cell_offsets_from_html_rows, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_html_table, parse_schedule_from_clipboard, parse_schedule_from_html_rows, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard, parse_unavailable_from_html_rows, parse_unavailable_from_html_rows_by_position
 from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .module_settings import load_modules, save_modules
 from .rule_settings import load_team_rules, save_team_rules
-from .rule_utils import min_rules_for_date, rule_value_for_display, set_rule_value_from_display
+from .rule_utils import day_shift_key, min_rules_for_date, rule_value_for_display, set_rule_value_from_display
 from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
@@ -93,7 +91,6 @@ RULE_SETTING_OPTIONS = (
 LEGACY_LABEL = "기존"
 LOCKED_SPLIT_COLOR = QColor("#f3f3f3")
 TEAM_SPLIT_START_DATE = date(2026, 8, 1)
-ADMIN_PASSWORD = "GMP1124"
 
 
 class PasteTableWidget(QTableWidget):
@@ -132,30 +129,6 @@ class PasteTableWidget(QTableWidget):
                 self.setItem(row, col, QTableWidgetItem(value.strip()))
 
 
-class ShiftComboDelegate(QStyledItemDelegate):
-    """Dropdown editor for schedule cells."""
-
-    def createEditor(self, parent, option, index):  # type: ignore[override]
-        if index.column() < 2:
-            return None
-        editor = QComboBox(parent)
-        editor.addItems(SHIFT_OPTIONS)
-        return editor
-
-    def setEditorData(self, editor, index) -> None:  # type: ignore[override]
-        if not isinstance(editor, QComboBox):
-            return
-        value = normalize_shift_code(index.data() or "")
-        pos = editor.findText("" if value == OFF else value)
-        editor.setCurrentIndex(max(0, pos))
-
-    def setModelData(self, editor, model, index) -> None:  # type: ignore[override]
-        if not isinstance(editor, QComboBox):
-            return
-        value = normalize_shift_code(editor.currentText())
-        model.setData(index, "" if value == OFF else value)
-
-
 class MonthRosterTable(PasteTableWidget):
     """A month table in the yearly view that accepts Ctrl+V directly."""
 
@@ -168,12 +141,7 @@ class MonthRosterTable(PasteTableWidget):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectItems)
-        self.setEditTriggers(
-            QAbstractItemView.DoubleClicked
-            | QAbstractItemView.SelectedClicked
-            | QAbstractItemView.EditKeyPressed
-            | QAbstractItemView.AnyKeyPressed
-        )
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if event.matches(QKeySequence.Copy):
@@ -255,7 +223,6 @@ class MainWindow(QMainWindow):
         self.rule_settings_source = RULE_COMBINED
         self.rules = self.team_rules[self.rule_settings_source]
         self.module_names = load_modules()
-        self.is_admin = False
         self.admin_only_widgets: List[QWidget] = []
         self.admin_only_actions: List[QAction] = []
         self._updating_table = False
@@ -287,25 +254,18 @@ class MainWindow(QMainWindow):
         self.employee_table.customContextMenuRequested.connect(self.show_employee_module_menu)
 
         self.paste_box = QTextEdit()
-        self.paste_box.setPlaceholderText("보조 입력칸입니다. 엑셀에서 표 범위 복사 → [엑셀 근무표 붙여넣기] 또는 표에서 Ctrl+V. 근무 코드와 회색 불가일을 함께 인식합니다.")
+        self.paste_box.setPlaceholderText("보조 입력칸입니다. 엑셀에서 표 범위를 복사한 뒤 근무표에서 Ctrl+V 하세요. 근무 코드와 회색 불가일을 함께 인식합니다.")
         self.paste_box.setMaximumHeight(100)
 
         self.schedule_table = CurrentMonthRosterTable(self, 0, 0)
-        self.schedule_table.setItemDelegate(ShiftComboDelegate(self.schedule_table))
         self.schedule_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.schedule_table.setSelectionBehavior(QAbstractItemView.SelectItems)
-        self.schedule_table.setEditTriggers(
-            QAbstractItemView.DoubleClicked
-            | QAbstractItemView.SelectedClicked
-            | QAbstractItemView.EditKeyPressed
-            | QAbstractItemView.AnyKeyPressed
-        )
+        self.schedule_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.schedule_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.schedule_table.customContextMenuRequested.connect(
             lambda pos: self.show_schedule_cell_menu(self.schedule_table, self.result, pos)
         )
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
-        self.schedule_table.cellDoubleClicked.connect(self.on_schedule_cell_double_clicked)
         self.month_split_scroll = QScrollArea()
         self.month_split_scroll.setWidgetResizable(True)
         self.month_split_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -354,6 +314,8 @@ class MainWindow(QMainWindow):
         for team in TEAM_VIEWS:
             self.stats_source_combo.addItem(team, team)
         self.stats_source_combo.currentIndexChanged.connect(lambda _index: self.render_cumulative_stats())
+        self.stats_latest_people_check = QCheckBox("최신달 인원만")
+        self.stats_latest_people_check.stateChanged.connect(lambda _state: self.render_cumulative_stats())
         self.stats_value_mode_combo = QComboBox()
         self.stats_value_mode_combo.addItems(["갯수", "퍼센트", "갯수+퍼센트"])
         self.stats_value_mode_combo.currentTextChanged.connect(lambda _text: self.render_cumulative_stats())
@@ -447,82 +409,24 @@ class MainWindow(QMainWindow):
         )
 
     def current_edit_triggers(self) -> QAbstractItemView.EditTriggers:
-        return self.admin_edit_triggers() if self.is_admin else QAbstractItemView.NoEditTriggers
+        return self.admin_edit_triggers()
 
     def require_admin(self, action: str = "이 작업") -> bool:
-        if self.is_admin:
-            return True
-        QMessageBox.warning(self, "관리자 권한 필요", f"{action}은 관리자만 할 수 있습니다. 관리자 로그인 후 다시 시도하세요.")
-        return False
-
-    def login_admin(self) -> None:
-        password, ok = QInputDialog.getText(
-            self,
-            "관리자 로그인",
-            "관리자 비밀번호",
-            QLineEdit.Password,
-        )
-        if not ok:
-            return
-        if password != ADMIN_PASSWORD:
-            QMessageBox.warning(self, "관리자 로그인 실패", "관리자 비밀번호가 맞지 않습니다.")
-            return
-        self.set_admin_mode(True)
-        QMessageBox.information(self, "관리자 로그인", "관리자 모드로 전환했습니다.")
-
-    def logout_admin(self) -> None:
-        self.set_admin_mode(False)
-
-    def set_admin_mode(self, enabled: bool) -> None:
-        self.is_admin = enabled
-        self.apply_access_mode()
-        if self.result:
-            self.render_schedule_table()
+        return True
 
     def apply_access_mode(self) -> None:
-        if hasattr(self, "role_label"):
-            self.role_label.setText(f"권한: {'관리자' if self.is_admin else '일반'}")
-        if hasattr(self, "admin_login_btn"):
-            self.admin_login_btn.setVisible(not self.is_admin)
-        if hasattr(self, "admin_logout_btn"):
-            self.admin_logout_btn.setVisible(self.is_admin)
         for action in self.admin_only_actions:
-            action.setEnabled(self.is_admin)
+            action.setEnabled(True)
         for widget in self.admin_only_widgets:
-            widget.setEnabled(self.is_admin)
+            widget.setEnabled(True)
         if hasattr(self, "schedule_table"):
-            self.schedule_table.setEditTriggers(self.current_edit_triggers())
+            self.schedule_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         if hasattr(self, "employee_table"):
             self.employee_table.setEditTriggers(self.current_edit_triggers())
         if hasattr(self, "paste_box"):
-            self.paste_box.setEnabled(self.is_admin)
+            self.paste_box.setEnabled(True)
         if hasattr(self, "tabs") and hasattr(self, "settings_tab_index"):
-            self.tabs.setTabEnabled(self.settings_tab_index, self.is_admin)
-
-    @staticmethod
-    def employee_display_name(emp: Employee) -> str:
-        return f"{emp.name} ({emp.employee_id})" if emp.employee_id else emp.name
-
-    def refresh_unavailable_employee_combo(self) -> None:
-        if not hasattr(self, "unavailable_employee_combo"):
-            return
-        current_key = self.unavailable_employee_combo.currentData()
-        self.unavailable_employee_combo.blockSignals(True)
-        self.unavailable_employee_combo.clear()
-        self.unavailable_employee_combo.addItem("내 이름 선택", "")
-        for emp in self.employees:
-            self.unavailable_employee_combo.addItem(self.employee_display_name(emp), emp.key)
-        if current_key:
-            index = self.unavailable_employee_combo.findData(current_key)
-            if index >= 0:
-                self.unavailable_employee_combo.setCurrentIndex(index)
-        self.unavailable_employee_combo.blockSignals(False)
-
-    def selected_unavailable_employee_key(self) -> str:
-        if not hasattr(self, "unavailable_employee_combo"):
-            return ""
-        value = self.unavailable_employee_combo.currentData()
-        return str(value or "")
+            self.tabs.setTabEnabled(self.settings_tab_index, True)
 
     def refresh_module_list(self) -> None:
         if not hasattr(self, "module_list_widget"):
@@ -530,6 +434,7 @@ class MainWindow(QMainWindow):
         self.module_list_widget.clear()
         for name in self.module_names:
             self.module_list_widget.addItem(name)
+        self.refresh_module_weight_module_combo()
 
     def add_module_from_input(self) -> None:
         if not hasattr(self, "module_name_edit"):
@@ -553,6 +458,7 @@ class MainWindow(QMainWindow):
         save_modules(self.module_names)
         self.refresh_module_list()
         self.clear_module_from_employees(name)
+        self.remove_module_weight_settings(name)
 
     def selected_employee_rows(self, fallback_row: int = -1) -> List[int]:
         rows = sorted({index.row() for index in self.employee_table.selectedIndexes() if index.row() >= 0})
@@ -635,48 +541,103 @@ class MainWindow(QMainWindow):
         if changed:
             self.employees = self.collect_employees()
 
-    def toggle_unavailable_for_cell(self, table: QTableWidget, result: Optional[ScheduleResult], row: int, col: int) -> None:
-        if self.is_admin or not isinstance(result, ScheduleResult) or col < 2:
+    def refresh_module_weight_module_combo(self) -> None:
+        if not hasattr(self, "module_weight_module_combo"):
             return
-        selected_key = self.selected_unavailable_employee_key()
-        if not selected_key:
-            QMessageBox.warning(self, "이름 선택 필요", "상단의 내 이름을 먼저 선택하세요.")
+        current = self.module_weight_module_combo.currentData()
+        self.module_weight_module_combo.blockSignals(True)
+        self.module_weight_module_combo.clear()
+        self.module_weight_module_combo.addItem("모듈 선택", "")
+        for module_name in self.module_names:
+            self.module_weight_module_combo.addItem(module_name, module_name)
+        if current:
+            index = self.module_weight_module_combo.findData(current)
+            if index >= 0:
+                self.module_weight_module_combo.setCurrentIndex(index)
+        self.module_weight_module_combo.blockSignals(False)
+        self.populate_module_weight_widgets()
+
+    def selected_module_weight_source(self) -> str:
+        if not hasattr(self, "module_weight_source_combo"):
+            return VIEW_V11
+        value = self.module_weight_source_combo.currentData()
+        return str(value) if value in TEAM_VIEWS else VIEW_V11
+
+    def selected_module_weight_name(self) -> str:
+        if not hasattr(self, "module_weight_module_combo"):
+            return ""
+        return str(self.module_weight_module_combo.currentData() or "")
+
+    def module_weight_keys(self) -> set[str]:
+        return {
+            day_shift_key(day_type, shift)
+            for day_type in DAY_TYPE_ORDER
+            for shift in (SHIFT_DAY, SHIFT_SWING, SHIFT_GY)
+        }
+
+    def populate_module_weight_widgets(self) -> None:
+        if not hasattr(self, "module_weight_checks"):
             return
-        if row < 0 or row >= len(result.employees):
+        source = self.selected_module_weight_source()
+        module_name = self.selected_module_weight_name()
+        weights = self.team_rules[source].module_weights.get(module_name, {}) if module_name else {}
+        selected_keys = set(weights)
+        percent = max(weights.values(), default=20)
+        for (day_type, shift), checkbox in self.module_weight_checks.items():
+            checkbox.blockSignals(True)
+            checkbox.setChecked(day_shift_key(day_type, shift) in selected_keys)
+            checkbox.blockSignals(False)
+        self.module_weight_percent_spin.blockSignals(True)
+        self.module_weight_percent_spin.setValue(percent)
+        self.module_weight_percent_spin.blockSignals(False)
+
+    def sync_module_weight_widgets(self, *, save: bool = True) -> None:
+        if not hasattr(self, "module_weight_checks"):
             return
-        emp = result.employees[row]
-        if emp.key != selected_key:
-            QMessageBox.warning(self, "본인 행만 수정", "일반 사용자는 선택한 본인 행의 근무 불가일만 표시할 수 있습니다.")
+        module_name = self.selected_module_weight_name()
+        if not module_name:
             return
-        dates = month_dates(result.year, result.month)
-        day_index = col - 2
-        if day_index < 0 or day_index >= len(dates):
+        source = self.selected_module_weight_source()
+        rules = self.team_rules[source]
+        configured = rules.module_weights.setdefault(module_name, {})
+        for key in self.module_weight_keys():
+            configured.pop(key, None)
+        percent = self.module_weight_percent_spin.value()
+        if percent > 0:
+            for (day_type, shift), checkbox in self.module_weight_checks.items():
+                if checkbox.isChecked():
+                    configured[day_shift_key(day_type, shift)] = percent
+        if not configured:
+            rules.module_weights.pop(module_name, None)
+        if save:
+            save_team_rules(self.team_rules)
+
+    def save_module_weight_from_widgets(self) -> None:
+        if not self.selected_module_weight_name():
+            QMessageBox.warning(self, "모듈 선택 필요", "가중치를 적용할 모듈을 먼저 선택하세요.")
             return
-        d = dates[day_index]
-        if d in emp.unavailable_dates:
-            emp.unavailable_dates.remove(d)
-            action = "해제"
-        else:
-            emp.unavailable_dates.add(d)
-            action = "표시"
-        try:
-            replace_employee_unavailable_days(emp, result.year, result.month, self.storage_source_name(result))
-        except Exception as exc:
-            QMessageBox.critical(self, "불가일 저장 실패", str(exc))
+        self.sync_module_weight_widgets(save=True)
+        self.statusBar().showMessage("모듈 근무 가중치를 저장했습니다.", 4000)
+
+    def clear_module_weight_from_widgets(self) -> None:
+        module_name = self.selected_module_weight_name()
+        if not module_name:
             return
-        item = table.item(row, col)
-        if item:
-            shift = result.schedule.get(d, {}).get(emp.key, OFF)
-            self.apply_schedule_cell_background(item, result, emp, d, shift, include_validation=True)
-        if (
-            self.result
-            and self.result.year == result.year
-            and self.result.month == result.month
-            and self.storage_source_name(self.result) == self.storage_source_name(result)
-        ):
-            self.refresh_validation_and_stats()
-        self.mark_year_overview_dirty()
-        self.statusBar().showMessage(f"{d.isoformat()} {emp.name} 근무 불가일 {action} 완료", 4000)
+        source = self.selected_module_weight_source()
+        self.team_rules[source].module_weights.pop(module_name, None)
+        save_team_rules(self.team_rules)
+        self.populate_module_weight_widgets()
+        self.statusBar().showMessage("모듈 근무 가중치를 삭제했습니다.", 4000)
+
+    def remove_module_weight_settings(self, module_name: str) -> None:
+        changed = False
+        for rules in self.team_rules.values():
+            if module_name in rules.module_weights:
+                rules.module_weights.pop(module_name, None)
+                changed = True
+        if changed:
+            save_team_rules(self.team_rules)
+            self.refresh_module_weight_module_combo()
 
     def set_current_month(self, year: int, month: int) -> None:
         self._suppress_month_reload = True
@@ -849,8 +810,6 @@ class MainWindow(QMainWindow):
         return stored
 
     def save_result_to_db(self, result: ScheduleResult) -> int:
-        if not self.is_admin:
-            raise PermissionError("관리자만 근무표를 저장할 수 있습니다.")
         source_name = self.storage_source_name(result)
         stored = self.result_for_storage(result, source_name)
         schedule_id = save_schedule(stored, source_name)
@@ -1035,21 +994,9 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(root)
 
         top = QHBoxLayout()
-        self.role_label = QLabel("")
-        self.admin_login_btn = QPushButton("관리자 로그인")
-        self.admin_login_btn.clicked.connect(self.login_admin)
-        self.admin_logout_btn = QPushButton("일반 모드")
-        self.admin_logout_btn.clicked.connect(self.logout_admin)
         refresh_db_btn = QPushButton("새로고침")
         refresh_db_btn.clicked.connect(self.refresh_current_month_from_db)
-        self.unavailable_employee_combo = QComboBox()
-        self.unavailable_employee_combo.setMinimumWidth(160)
-        top.addWidget(self.role_label)
-        top.addWidget(self.admin_login_btn)
-        top.addWidget(self.admin_logout_btn)
         top.addWidget(refresh_db_btn)
-        top.addWidget(QLabel("내 이름"))
-        top.addWidget(self.unavailable_employee_combo)
         top.addWidget(QLabel("연도"))
         top.addWidget(self.year_spin)
         top.addWidget(QLabel("월"))
@@ -1061,18 +1008,12 @@ class MainWindow(QMainWindow):
         validate_btn.clicked.connect(self.refresh_validation_and_stats)
         refresh_year_btn = QPushButton("연간 보기 갱신")
         refresh_year_btn.clicked.connect(self.render_year_overview)
-        paste_btn = QPushButton("엑셀 근무표 붙여넣기")
-        paste_btn.clicked.connect(self.paste_schedule_from_clipboard)
-        import_excel_btn = QPushButton("엑셀 파일 근무표 불러오기")
-        import_excel_btn.clicked.connect(self.import_schedule_excel)
         top.addWidget(generate_btn)
         top.addWidget(validate_btn)
         top.addWidget(refresh_year_btn)
-        top.addWidget(paste_btn)
-        top.addWidget(import_excel_btn)
         top.addStretch(1)
         root_layout.addLayout(top)
-        self.admin_only_widgets.extend([generate_btn, paste_btn, import_excel_btn])
+        self.admin_only_widgets.append(generate_btn)
 
         splitter = QSplitter(Qt.Vertical)
         self.tabs = QTabWidget()
@@ -1109,6 +1050,7 @@ class MainWindow(QMainWindow):
         period_layout = QHBoxLayout()
         period_layout.addWidget(QLabel("대상"))
         period_layout.addWidget(self.stats_source_combo)
+        period_layout.addWidget(self.stats_latest_people_check)
         period_layout.addWidget(QLabel("기간"))
         period_layout.addWidget(self.stats_start_year_spin)
         period_layout.addWidget(QLabel("년"))
@@ -1185,10 +1127,63 @@ class MainWindow(QMainWindow):
         module_layout.addLayout(module_button_row)
         self.refresh_module_list()
 
+        module_weight_group = QGroupBox("모듈 근무 가중치")
+        module_weight_layout = QVBoxLayout(module_weight_group)
+        module_weight_top = QHBoxLayout()
+        self.module_weight_source_combo = QComboBox()
+        for team in TEAM_VIEWS:
+            self.module_weight_source_combo.addItem(team, team)
+        self.module_weight_source_combo.currentIndexChanged.connect(lambda _index: self.populate_module_weight_widgets())
+        self.module_weight_module_combo = QComboBox()
+        self.module_weight_module_combo.currentIndexChanged.connect(lambda _index: self.populate_module_weight_widgets())
+        self.module_weight_percent_spin = QSpinBox()
+        self.module_weight_percent_spin.setRange(0, 300)
+        self.module_weight_percent_spin.setSuffix("%")
+        self.module_weight_percent_spin.setValue(20)
+        module_weight_top.addWidget(QLabel("대상"))
+        module_weight_top.addWidget(self.module_weight_source_combo)
+        module_weight_top.addWidget(QLabel("모듈"))
+        module_weight_top.addWidget(self.module_weight_module_combo, 1)
+        module_weight_top.addWidget(QLabel("추가"))
+        module_weight_top.addWidget(self.module_weight_percent_spin)
+        module_weight_layout.addLayout(module_weight_top)
+        self.module_weight_checks: Dict[tuple[str, str], QCheckBox] = {}
+        self.module_weight_table = QTableWidget(len(DAY_TYPE_ORDER), 4)
+        self.module_weight_table.setHorizontalHeaderLabels(["구분", "Day", "SW", "GY"])
+        self.module_weight_table.verticalHeader().setVisible(False)
+        self.module_weight_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        for row, day_type in enumerate(DAY_TYPE_ORDER):
+            label_item = QTableWidgetItem(DAY_TYPE_LABELS[day_type])
+            label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
+            self.module_weight_table.setItem(row, 0, label_item)
+            for col, shift in enumerate((SHIFT_DAY, SHIFT_SWING, SHIFT_GY), start=1):
+                checkbox = QCheckBox()
+                checkbox.setStyleSheet("margin-left: 12px; margin-right: 12px;")
+                self.module_weight_checks[(day_type, shift)] = checkbox
+                self.module_weight_table.setCellWidget(row, col, checkbox)
+        self.module_weight_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.module_weight_table.verticalHeader().setDefaultSectionSize(30)
+        self.module_weight_table.setFixedHeight(190)
+        module_weight_layout.addWidget(self.module_weight_table)
+        module_weight_button_row = QHBoxLayout()
+        save_module_weight_btn = QPushButton("가중치 저장")
+        clear_module_weight_btn = QPushButton("가중치 삭제")
+        save_module_weight_btn.clicked.connect(self.save_module_weight_from_widgets)
+        clear_module_weight_btn.clicked.connect(self.clear_module_weight_from_widgets)
+        module_weight_button_row.addStretch(1)
+        module_weight_button_row.addWidget(clear_module_weight_btn)
+        module_weight_button_row.addWidget(save_module_weight_btn)
+        module_weight_layout.addLayout(module_weight_button_row)
+        self.refresh_module_weight_module_combo()
+
+        side_settings = QVBoxLayout()
+        side_settings.addWidget(rule_group)
+        side_settings.addWidget(module_group)
+        side_settings.addWidget(module_weight_group)
+        side_settings.addStretch(1)
+
         settings_layout.addWidget(staffing_group, 2)
-        settings_layout.addWidget(rule_group)
-        settings_layout.addWidget(module_group)
-        settings_layout.addStretch(1)
+        settings_layout.addLayout(side_settings, 2)
         self.settings_tab_index = tabs.addTab(settings_tab, "근무 설정")
 
         splitter.addWidget(tabs)
@@ -1202,7 +1197,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self.tabs.currentChanged.connect(self.on_tab_changed)
         self.tabs.setCurrentIndex(self.year_tab_index)
-        self.refresh_unavailable_employee_combo()
         self.apply_access_mode()
 
     def add_employee_rows(self, employees: List[Employee]) -> None:
@@ -1216,7 +1210,6 @@ class MainWindow(QMainWindow):
             unavailable = ", ".join(sorted(d.isoformat() for d in emp.unavailable_dates))
             self.employee_table.setItem(row, 3, QTableWidgetItem(unavailable))
             self.employee_table.setItem(row, 4, QTableWidgetItem(emp.module))
-        self.refresh_unavailable_employee_combo()
         self.apply_access_mode()
 
     def sync_rules_from_widgets(
@@ -1244,6 +1237,7 @@ class MainWindow(QMainWindow):
         }
         rules.max_consecutive_work_days = self.max_consecutive_spin.value()
         rules.max_consecutive_gy = self.max_consecutive_gy_spin.value()
+        self.sync_module_weight_widgets(save=False)
         if update_source == self.rule_settings_source:
             self.rules = rules
         if save:
@@ -1542,9 +1536,14 @@ class MainWindow(QMainWindow):
                 f"- {DAY_TYPE_LABELS[day_type]}: Day {day_rules.get(SHIFT_DAY, 0)}명, "
                 f"SW {day_rules.get(SHIFT_SWING, 0)}명, {gy_label} {day_rules.get(gy_shift, 0)}명"
             )
+        weight_lines = self.module_weight_rule_lines(rules)
+        weight_text = ""
+        if weight_lines:
+            weight_text = f"- 모듈 가중치:\n{chr(10).join(weight_lines)}\n"
         return (
             f"아래 규칙으로 {target_source} 근무표를 자동 생성합니다.\n\n"
             f"{chr(10).join(rule_lines)}\n"
+            f"{weight_text}"
             f"- 최대 연속 근무: {rules.max_consecutive_work_days}일\n"
             f"- 최대 연속 G/당직: {rules.max_consecutive_gy}일\n"
             "- 직원별 불가일은 근무 배정에서 제외합니다.\n"
@@ -1552,6 +1551,37 @@ class MainWindow(QMainWindow):
             "- 전월 말 당직 이월 규칙을 반영합니다.\n\n"
             "확인을 누르면 바로 생성하고 DB에 자동 저장합니다."
         )
+
+    def module_weight_rule_lines(self, rules: ShiftRules) -> List[str]:
+        lines: List[str] = []
+        for module_name in sorted(rules.module_weights):
+            weights = rules.module_weights.get(module_name, {})
+            if not weights:
+                continue
+            by_percent: Dict[int, List[str]] = {}
+            for key, percent in weights.items():
+                by_percent.setdefault(percent, []).append(self.module_weight_key_label(key))
+            for percent in sorted(by_percent, reverse=True):
+                labels = ", ".join(sorted(by_percent[percent]))
+                lines.append(f"  · {module_name}: {labels} +{percent}%")
+        return lines
+
+    def module_weight_key_label(self, key: str) -> str:
+        day_type, shift = key.split(":", 1) if ":" in key else ("", key)
+        day_label = DAY_TYPE_LABELS.get(day_type, day_type or "기타")
+        if day_type == DAY_TYPE_ORDER[3] and shift == SHIFT_DUTY:
+            shift_label = "당직"
+        elif shift == SHIFT_DAY:
+            shift_label = "Day"
+        elif shift == SHIFT_SWING:
+            shift_label = "SW"
+        elif shift == SHIFT_GY:
+            shift_label = "GY"
+        elif shift == SHIFT_DUTY:
+            shift_label = "당직"
+        else:
+            shift_label = shift
+        return f"{day_label} {shift_label}"
 
     def confirm_generation_rules(self, source_name: Optional[str] = None) -> bool:
         answer = QMessageBox.question(
@@ -1610,7 +1640,6 @@ class MainWindow(QMainWindow):
     def make_schedule_generate_button(self, year: int, month: int, source_name: str) -> QPushButton:
         button = QPushButton("근무표 생성")
         button.setFixedWidth(105)
-        button.setEnabled(getattr(self, "is_admin", True))
         button.clicked.connect(
             lambda _checked=False, y=year, m=month, s=source_name: self.create_schedule_for_month_source(y, m, s)
         )
@@ -1619,7 +1648,6 @@ class MainWindow(QMainWindow):
     def make_schedule_regenerate_button(self, year: int, month: int, source_name: str) -> QPushButton:
         button = QPushButton("근무표 재생성")
         button.setFixedWidth(115)
-        button.setEnabled(getattr(self, "is_admin", True))
         button.clicked.connect(
             lambda _checked=False, y=year, m=month, s=source_name: self.regenerate_schedule_for_month_source(y, m, s)
         )
@@ -1628,7 +1656,6 @@ class MainWindow(QMainWindow):
     def make_seed_employees_button(self, year: int, month: int, source_name: str) -> QPushButton:
         button = QPushButton("인원 반영")
         button.setFixedWidth(90)
-        button.setEnabled(getattr(self, "is_admin", True))
         button.clicked.connect(
             lambda _checked=False, y=year, m=month, s=source_name: self.create_empty_roster_from_previous(y, m, s)
         )
@@ -1745,11 +1772,7 @@ class MainWindow(QMainWindow):
         target_table = table
         if target_table is None and not self.schedule_table.isHidden():
             target_table = self.schedule_table
-        selected_key = self.selected_unavailable_employee_key()
-        employee_index_by_key = {emp.key: idx for idx, emp in enumerate(result.employees)}
-        if selected_key:
-            start_row = employee_index_by_key.get(selected_key, -1)
-        elif target_table is not None:
+        if target_table is not None:
             start_row = target_table.currentRow()
         else:
             start_row = -1
@@ -1762,7 +1785,7 @@ class MainWindow(QMainWindow):
         updated = list(result.employees)
         hit = 0
         for row_offset, col_offset in gray_offsets:
-            row = start_row if selected_key else start_row + row_offset
+            row = start_row + row_offset
             day_index = start_col - 2 + col_offset
             if row < 0 or row >= len(updated) or day_index < 0 or day_index >= len(dates):
                 continue
@@ -1836,9 +1859,6 @@ class MainWindow(QMainWindow):
         self.apply_imported_schedule(imported, Path(path).name)
 
     def paste_current_month_clipboard(self) -> None:
-        if not self.is_admin:
-            self.paste_unavailable_from_clipboard()
-            return
         if self.clipboard_looks_like_full_roster():
             self.paste_schedule_from_clipboard()
             return
@@ -1849,9 +1869,6 @@ class MainWindow(QMainWindow):
         self.paste_schedule_cells_from_clipboard()
 
     def paste_month_table_clipboard(self, table: MonthRosterTable) -> None:
-        if not self.is_admin:
-            self.paste_unavailable_from_clipboard()
-            return
         if self.clipboard_looks_like_full_roster():
             result = getattr(table, "result", None)
             source_name = result.source_name if isinstance(result, ScheduleResult) else None
@@ -2254,10 +2271,6 @@ class MainWindow(QMainWindow):
         self.refresh_validation_and_stats()
 
     def paste_unavailable_from_clipboard(self) -> None:
-        selected_key = self.selected_unavailable_employee_key()
-        if not self.is_admin and not selected_key:
-            QMessageBox.warning(self, "이름 선택 필요", "상단의 내 이름을 먼저 선택하세요.")
-            return
         text, html = self._clipboard_text_html()
         if not html.strip():
             QMessageBox.warning(self, "붙여넣기 실패", "회색 셀은 텍스트만으로 인식할 수 없습니다. 엑셀에서 표 범위를 복사한 뒤 근무표에 붙여넣으세요.")
@@ -2277,22 +2290,14 @@ class MainWindow(QMainWindow):
             return
         hit = 0
         updated = []
-        selected_employee: Optional[Employee] = None
         for emp in self.employees:
-            if not self.is_admin and emp.key != selected_key:
-                updated.append(emp)
-                continue
             dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
             if dates:
                 hit += len(dates)
                 new_emp = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module)
                 updated.append(new_emp)
-                if emp.key == selected_key:
-                    selected_employee = new_emp
             else:
                 updated.append(emp)
-                if emp.key == selected_key:
-                    selected_employee = emp
         if hit <= 0:
             if self.result and self.apply_gray_cells_by_position(html_rows, self.result):
                 return
@@ -2303,10 +2308,7 @@ class MainWindow(QMainWindow):
             self.result.employees = self.employees
             source_name = self.storage_source_name(self.result)
             try:
-                if self.is_admin:
-                    save_unavailable_days(self.employees, source_name, self.result.year, self.result.month)
-                elif selected_employee:
-                    replace_employee_unavailable_days(selected_employee, self.result.year, self.result.month, source_name)
+                save_unavailable_days(self.employees, source_name, self.result.year, self.result.month)
             except Exception as exc:
                 QMessageBox.critical(self, "불가일 저장 실패", str(exc))
                 return
@@ -2494,8 +2496,7 @@ class MainWindow(QMainWindow):
         row_count = max(1, len(result.employees))
         table = MonthRosterTable(self, result.year, result.month, row_count, len(dates) + 2)
         table.result = result
-        table.setItemDelegate(ShiftComboDelegate(table))
-        table.setEditTriggers(self.current_edit_triggers())
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setHorizontalHeaderLabels(["성명", "사번"] + [str(d.day) for d in dates])
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
@@ -2537,15 +2538,11 @@ class MainWindow(QMainWindow):
                     cell = QTableWidgetItem("" if shift == OFF else shift)
                     cell.setTextAlignment(Qt.AlignCenter)
                     self.apply_schedule_cell_background(cell, result, emp, d, shift)
-                    if self.is_locked_split_cell(result, d) or not self.is_admin:
-                        cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                        if self.is_locked_split_cell(result, d):
-                            cell.setToolTip("2026-08 전 기존 근무표입니다.")
-                    else:
-                        cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+                    cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    if self.is_locked_split_cell(result, d):
+                        cell.setToolTip("2026-08 전 기존 근무표입니다.")
                     table.setItem(row, col, cell)
         table.cellChanged.connect(lambda row, col, t=table: self.on_month_table_cell_changed(t, row, col))
-        table.cellDoubleClicked.connect(lambda row, col, t=table: self.on_month_table_cell_double_clicked(t, row, col))
         self.configure_roster_table_layout(table, len(dates), row_count, overview=True)
         return table
 
@@ -2607,7 +2604,6 @@ class MainWindow(QMainWindow):
             if clearable:
                 clear_btn = QPushButton("이 달 초기화")
                 clear_btn.setFixedWidth(95)
-                clear_btn.setEnabled(self.is_admin)
                 clear_btn.clicked.connect(lambda _checked=False, y=year, m=month: self.clear_month_schedule(y, m))
                 title_row.addWidget(clear_btn)
             self.year_scroll_layout.addLayout(title_row)
@@ -2705,7 +2701,7 @@ class MainWindow(QMainWindow):
         self.month_split_scroll.hide()
         self.schedule_table.show()
         self.schedule_table.clear()
-        self.schedule_table.setEditTriggers(self.current_edit_triggers())
+        self.schedule_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.schedule_table.setRowCount(len(self.result.employees))
         self.schedule_table.setColumnCount(len(dates) + 2)
         headers = ["성명", "사번"] + [f"{weekday_ko(d)}\n{d.day}" for d in dates]
@@ -2739,12 +2735,9 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
                 self.apply_schedule_cell_background(item, self.result, emp, d, shift)
-                if self.is_locked_split_cell(self.result, d) or not self.is_admin:
-                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                    if self.is_locked_split_cell(self.result, d):
-                        item.setToolTip("2026-08 전 기존 근무표입니다.")
-                else:
-                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if self.is_locked_split_cell(self.result, d):
+                    item.setToolTip("2026-08 전 기존 근무표입니다.")
                 self.schedule_table.setItem(row, col, item)
         self.schedule_table.verticalHeader().setVisible(False)
         self.configure_roster_table_layout(self.schedule_table, len(dates), len(self.result.employees), overview=False)
@@ -2754,9 +2747,6 @@ class MainWindow(QMainWindow):
 
     def on_schedule_cell_changed(self, row: int, col: int) -> None:
         if self._updating_table or col < 2 or not self.result:
-            return
-        if not self.is_admin:
-            self.render_schedule_table()
             return
         dates = month_dates(self.result.year, self.result.month)
         day_index = col - 2
@@ -2779,28 +2769,11 @@ class MainWindow(QMainWindow):
         self.render_schedule_table()
         self.refresh_validation_and_stats()
 
-    def on_schedule_cell_double_clicked(self, row: int, col: int) -> None:
-        self.toggle_unavailable_for_cell(self.schedule_table, self.result, row, col)
-
     def on_month_table_cell_changed(self, table: MonthRosterTable, row: int, col: int) -> None:
         if col < 2:
             return
         result = getattr(table, "result", None)
         if not isinstance(result, ScheduleResult):
-            return
-        if not self.is_admin:
-            dates = month_dates(result.year, result.month)
-            day_index = col - 2
-            if 0 <= row < len(result.employees) and 0 <= day_index < len(dates):
-                emp = result.employees[row]
-                d = dates[day_index]
-                shift = result.schedule.get(d, {}).get(emp.key, OFF)
-                item = table.item(row, col)
-                if item:
-                    table.blockSignals(True)
-                    item.setText("" if shift == OFF else shift)
-                    self.apply_schedule_cell_background(item, result, emp, d, shift, include_validation=True)
-                    table.blockSignals(False)
             return
         dates = month_dates(result.year, result.month)
         day_index = col - 2
@@ -2835,9 +2808,6 @@ class MainWindow(QMainWindow):
             self.refresh_validation_and_stats()
         self.mark_cumulative_stats_dirty()
         self.mark_year_overview_dirty()
-
-    def on_month_table_cell_double_clicked(self, table: MonthRosterTable, row: int, col: int) -> None:
-        self.toggle_unavailable_for_cell(table, getattr(table, "result", None), row, col)
 
     @staticmethod
     def normalize_shift(text: str) -> str:
@@ -3150,6 +3120,25 @@ class MainWindow(QMainWindow):
             return ""
         return str(self.stats_source_combo.currentData() or "")
 
+    def latest_stats_people_only(self) -> bool:
+        return bool(hasattr(self, "stats_latest_people_check") and self.stats_latest_people_check.isChecked())
+
+    def latest_stats_people(self, year: int, month: int) -> Dict[str, Dict[str, str]]:
+        selected_source = self.selected_stats_source_name()
+        sources: List[Optional[str]]
+        if selected_source:
+            sources = [selected_source]
+        elif self.month_has_team_dates(year, month):
+            sources = list(TEAM_VIEWS)
+        else:
+            sources = [None]
+        people: Dict[str, Dict[str, str]] = {}
+        for source in sources:
+            result = self.load_schedule_for_view(year, month, source)
+            for emp in result.employees:
+                people[emp.key] = {"name": emp.name, "employee_no": emp.employee_id}
+        return people
+
     def show_monthly_stats_filter_dialog(self) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("월별 필터 설정")
@@ -3247,6 +3236,18 @@ class MainWindow(QMainWindow):
             counts.setdefault(employee_key, {key: 0 for key in month_keys})
             if month_key in counts[employee_key]:
                 counts[employee_key][month_key] += 1
+
+        if self.latest_stats_people_only():
+            latest_people = self.latest_stats_people(end_year, end_month)
+            people = {
+                key: latest_people[key]
+                for key in latest_people
+                if key not in excluded
+            }
+            counts = {
+                key: counts.get(key, {month_key: 0 for month_key in month_keys})
+                for key in people
+            }
 
         sorted_keys = sorted(people, key=lambda key: (people[key]["name"], people[key]["employee_no"]))
         month_color_values = {
