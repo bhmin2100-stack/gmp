@@ -100,6 +100,18 @@ def _header_day(value: object) -> Optional[int]:
     text = str(value).strip()
     if not text:
         return None
+    full_date = re.search(r"\b\d{4}[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})", text)
+    if full_date:
+        day = int(full_date.group(2))
+        return day if 1 <= day <= 31 else None
+    month_day = re.search(r"\b\d{1,2}\s*[-./월]\s*(\d{1,2})\s*(?:일)?\b", text)
+    if month_day:
+        day = int(month_day.group(1))
+        return day if 1 <= day <= 31 else None
+    day_mark = re.search(r"(\d{1,2})\s*일", text)
+    if day_mark:
+        day = int(day_mark.group(1))
+        return day if 1 <= day <= 31 else None
     match = re.search(r"\d{1,2}", text)
     if not match:
         return None
@@ -107,6 +119,66 @@ def _header_day(value: object) -> Optional[int]:
     if 1 <= day <= 31:
         return day
     return None
+
+
+def _raise_day_count_mismatch(year: int, month: int, expected_count: int, pasted_count: int, detail: str = "") -> None:
+    message = (
+        f"날짜 칸 수가 맞지 않습니다.\n"
+        f"{year}년 {month}월은 {expected_count}일인데, 붙여넣은 표는 {pasted_count}일치로 보입니다.\n"
+        "엑셀에서 해당 월의 1일부터 말일까지 전체 날짜 칸을 다시 선택해서 붙여넣으세요."
+    )
+    if detail:
+        message += f"\n{detail}"
+    raise ValueError(message)
+
+
+def _validate_header_day_columns(
+    header: List[str],
+    name_col: int,
+    id_col: int,
+    valid_days: Set[int],
+    year: int,
+    month: int,
+) -> Dict[int, int]:
+    day_cols: Dict[int, int] = {}
+    header_days: List[int] = []
+    for col, cell in enumerate(header):
+        day = _header_day(cell)
+        if day is None or col in (name_col, id_col):
+            continue
+        header_days.append(day)
+        if day in valid_days:
+            day_cols[day] = col
+    if not header_days:
+        return day_cols
+
+    unique_days = set(header_days)
+    missing = sorted(valid_days - unique_days)
+    unexpected = sorted(unique_days - valid_days)
+    duplicate_count = len(header_days) - len(unique_days)
+    if missing or unexpected or duplicate_count:
+        details: List[str] = []
+        if missing:
+            details.append("빠진 날짜: " + ", ".join(f"{day}일" for day in missing))
+        if unexpected:
+            details.append("초과 날짜: " + ", ".join(f"{day}일" for day in unexpected))
+        if duplicate_count:
+            details.append("중복된 날짜 칸이 있습니다.")
+        _raise_day_count_mismatch(year, month, len(valid_days), len(unique_days), "\n".join(details))
+    return day_cols
+
+
+def _validate_inferred_day_columns(
+    rows: List[List[str]],
+    first_day_col: int,
+    valid_days: Set[int],
+    year: int,
+    month: int,
+) -> None:
+    row_lengths = [len(row) for row in rows if len(row) > first_day_col]
+    pasted_count = max((length - first_day_col for length in row_lengths), default=0)
+    if pasted_count != len(valid_days):
+        _raise_day_count_mismatch(year, month, len(valid_days), pasted_count)
 
 
 
@@ -356,13 +428,11 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
             break
 
     valid_dates = {d.day: d for d in month_dates(year, month)}
+    valid_days = set(valid_dates)
 
     if header_index is not None:
         header = rows[header_index]
-        for col, cell in enumerate(header):
-            day = _header_day(cell)
-            if day in valid_dates and col not in (name_col, id_col):
-                day_cols[day] = col
+        day_cols = _validate_header_day_columns(header, name_col, id_col, valid_days, year, month)
 
     if not day_cols:
         # Header might be omitted because the user clicked below "성명" and
@@ -373,6 +443,7 @@ def parse_schedule_from_tsv(text: str, year: int, month: int, rules: Optional[Sh
         has_employee_id_column = len(first_data_row) >= 2 and not _looks_like_shift_code(first_data_row[1])
         id_col = 1 if has_employee_id_column else -1
         first_day_col = 2 if has_employee_id_column else 1
+        _validate_inferred_day_columns(rows, first_day_col, valid_days, year, month)
         for offset, d in enumerate(month_dates(year, month), start=first_day_col):
             day_cols[d.day] = offset
 
