@@ -245,9 +245,11 @@ class MainWindow(QMainWindow):
 
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2100)
+        self.year_spin.setKeyboardTracking(True)
         self.year_spin.setValue(date.today().year)
         self.month_spin = QSpinBox()
         self.month_spin.setRange(1, 12)
+        self.month_spin.setKeyboardTracking(True)
         self.month_spin.setValue(date.today().month)
 
         self.schedule_source_label = QLabel("")
@@ -313,8 +315,8 @@ class MainWindow(QMainWindow):
         self.calendar_date_edit.setDate(QDate(today.year, today.month, today.day))
 
         self._build_ui()
-        self.year_spin.valueChanged.connect(lambda _value: self.load_selected_month_from_db())
-        self.month_spin.valueChanged.connect(lambda _value: self.load_selected_month_from_db())
+        self.year_spin.valueChanged.connect(lambda _value: self.on_selected_month_changed())
+        self.month_spin.valueChanged.connect(lambda _value: self.on_selected_month_changed())
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
@@ -513,6 +515,13 @@ class MainWindow(QMainWindow):
         self.update_schedule_source_status()
         if refresh_overview:
             self.mark_year_overview_dirty()
+
+    def on_selected_month_changed(self) -> None:
+        if self._suppress_month_reload:
+            return
+        if hasattr(self, "tabs") and self.tabs.currentIndex() != getattr(self, "schedule_tab_index", -1):
+            self.tabs.setCurrentIndex(self.schedule_tab_index)
+        self.load_selected_month_from_db()
 
     def on_tab_changed(self, index: int) -> None:
         if index == getattr(self, "year_tab_index", -1) and self._year_overview_dirty:
