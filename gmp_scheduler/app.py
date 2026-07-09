@@ -250,9 +250,13 @@ class MainWindow(QMainWindow):
         self.month_spin.setValue(date.today().month)
 
         self.split_enabled_check = QCheckBox("V11/V12 분할 사용")
-        self.split_date_edit = QDateEdit()
-        self.split_date_edit.setCalendarPopup(True)
-        self.split_date_edit.setDate(QDate(date.today().year, date.today().month, date.today().day))
+        default_split_year, default_split_month = self.default_split_start_month()
+        self.split_start_year_spin = QSpinBox()
+        self.split_start_year_spin.setRange(2020, 2100)
+        self.split_start_year_spin.setValue(default_split_year)
+        self.split_start_month_spin = QSpinBox()
+        self.split_start_month_spin.setRange(1, 12)
+        self.split_start_month_spin.setValue(default_split_month)
         self.schedule_view_combo = QComboBox()
         self.schedule_view_combo.addItem("기존", VIEW_LEGACY)
         self.schedule_view_combo.addItem("V11", VIEW_V11)
@@ -318,7 +322,8 @@ class MainWindow(QMainWindow):
         self.year_spin.valueChanged.connect(lambda _value: self.load_selected_month_from_db())
         self.month_spin.valueChanged.connect(lambda _value: self.load_selected_month_from_db())
         self.split_enabled_check.toggled.connect(lambda _checked: self.on_team_split_controls_changed())
-        self.split_date_edit.dateChanged.connect(lambda _date: self.on_team_split_controls_changed())
+        self.split_start_year_spin.valueChanged.connect(lambda _value: self.on_team_split_controls_changed())
+        self.split_start_month_spin.valueChanged.connect(lambda _value: self.on_team_split_controls_changed())
         self.schedule_view_combo.currentIndexChanged.connect(lambda _index: self.on_team_split_controls_changed())
         app = QApplication.instance()
         if app:
@@ -334,6 +339,13 @@ class MainWindow(QMainWindow):
     def is_team_source(source_name: str) -> bool:
         return source_name in TEAM_VIEWS
 
+    @staticmethod
+    def default_split_start_month() -> tuple[int, int]:
+        today = date.today()
+        if today.month < 12:
+            return today.year, today.month + 1
+        return today.year + 1, 1
+
     def load_team_split_settings_into_controls(self) -> None:
         self._loading_split_controls = True
         try:
@@ -344,17 +356,31 @@ class MainWindow(QMainWindow):
                 except Exception:
                     settings = {}
             enabled = bool(settings.get("enabled", False))
-            split_date_text = str(settings.get("split_date") or date.today().isoformat())
-            try:
-                split_date = date.fromisoformat(split_date_text)
-            except ValueError:
-                split_date = date.today()
+            default_year, default_month = self.default_split_start_month()
+
+            def int_setting(key: str, default: int) -> int:
+                try:
+                    return int(settings.get(key) or default)
+                except (TypeError, ValueError):
+                    return default
+
+            split_year = int_setting("split_start_year", default_year)
+            split_month = int_setting("split_start_month", default_month)
+            if "split_date" in settings and "split_start_year" not in settings:
+                try:
+                    old_split_date = date.fromisoformat(str(settings.get("split_date")))
+                    split_year = old_split_date.year
+                    split_month = old_split_date.month
+                except ValueError:
+                    pass
+            split_month = min(12, max(1, split_month))
             view = str(settings.get("view") or VIEW_LEGACY)
             if view not in (VIEW_LEGACY, *TEAM_VIEWS):
                 view = VIEW_LEGACY
 
             self.split_enabled_check.setChecked(enabled)
-            self.split_date_edit.setDate(QDate(split_date.year, split_date.month, split_date.day))
+            self.split_start_year_spin.setValue(split_year)
+            self.split_start_month_spin.setValue(split_month)
             index = self.schedule_view_combo.findData(view)
             self.schedule_view_combo.setCurrentIndex(max(0, index))
         finally:
@@ -364,6 +390,8 @@ class MainWindow(QMainWindow):
         split_date = self.split_date()
         settings = {
             "enabled": self.split_enabled_check.isChecked(),
+            "split_start_year": split_date.year,
+            "split_start_month": split_date.month,
             "split_date": split_date.isoformat(),
             "view": self.selected_schedule_view(),
         }
@@ -376,8 +404,7 @@ class MainWindow(QMainWindow):
         return VIEW_LEGACY
 
     def split_date(self) -> date:
-        qdate = self.split_date_edit.date()
-        return date(qdate.year(), qdate.month(), qdate.day())
+        return date(self.split_start_year_spin.value(), self.split_start_month_spin.value(), 1)
 
     def enabled_split_date(self) -> Optional[date]:
         return self.split_date() if self.split_enabled_check.isChecked() else None
@@ -398,7 +425,7 @@ class MainWindow(QMainWindow):
             split = self.enabled_split_date()
             dates = month_dates(year, month)
             if split and dates[0] < split <= dates[-1]:
-                return f"{source_name} (기준일 전 기존 표시)"
+                return f"{source_name} (시작월 전 기존 표시)"
             return source_name
         return LEGACY_LABEL
 
@@ -409,7 +436,7 @@ class MainWindow(QMainWindow):
         month = self.month_spin.value()
         label = self.source_label_for_view(year, month)
         if self.split_enabled_check.isChecked():
-            self.schedule_source_label.setText(f"보기/저장: {label} · 기준일 {self.split_date().isoformat()}")
+            self.schedule_source_label.setText(f"보기/저장: {label} · 시작월 {self.split_date():%Y-%m}")
         else:
             self.schedule_source_label.setText(f"보기/저장: {label} · 분할 미사용")
 
@@ -662,8 +689,11 @@ class MainWindow(QMainWindow):
         top.addWidget(QLabel("월"))
         top.addWidget(self.month_spin)
         top.addWidget(self.split_enabled_check)
-        top.addWidget(QLabel("기준일"))
-        top.addWidget(self.split_date_edit)
+        top.addWidget(QLabel("시작월"))
+        top.addWidget(self.split_start_year_spin)
+        top.addWidget(QLabel("년"))
+        top.addWidget(self.split_start_month_spin)
+        top.addWidget(QLabel("월"))
         top.addWidget(QLabel("보기"))
         top.addWidget(self.schedule_view_combo)
         top.addWidget(self.schedule_source_label)
@@ -1442,7 +1472,7 @@ class MainWindow(QMainWindow):
                 elif is_holiday_or_weekend(d, result.holidays):
                     item.setBackground(HOLIDAY_HEADER_COLOR)
                 if self.is_locked_split_cell(result, d):
-                    item.setToolTip("분할 기준일 전 기존 근무표입니다.")
+                    item.setToolTip("분할 시작월 전 기존 근무표입니다.")
             self.apply_staffing_header_style(table, result, col, d)
         if not result.employees:
             hint = QTableWidgetItem("여기에 클릭 후 Ctrl+V")
@@ -1467,7 +1497,7 @@ class MainWindow(QMainWindow):
                     cell.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
                     if self.is_locked_split_cell(result, d):
                         cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                        cell.setToolTip("분할 기준일 전 기존 근무표입니다.")
+                        cell.setToolTip("분할 시작월 전 기존 근무표입니다.")
                         if shift == OFF:
                             cell.setBackground(LOCKED_SPLIT_COLOR)
                     else:
@@ -1572,7 +1602,7 @@ class MainWindow(QMainWindow):
                 elif is_holiday_or_weekend(d, self.result.holidays):
                     item.setBackground(HOLIDAY_HEADER_COLOR)
                 if self.is_locked_split_cell(self.result, d):
-                    item.setToolTip("분할 기준일 전 기존 근무표입니다.")
+                    item.setToolTip("분할 시작월 전 기존 근무표입니다.")
             self.apply_staffing_header_style(self.schedule_table, self.result, col, d)
         for row, emp in enumerate(self.result.employees):
             name_item = QTableWidgetItem(emp.name)
@@ -1589,7 +1619,7 @@ class MainWindow(QMainWindow):
                 item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
                 if self.is_locked_split_cell(self.result, d):
                     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                    item.setToolTip("분할 기준일 전 기존 근무표입니다.")
+                    item.setToolTip("분할 시작월 전 기존 근무표입니다.")
                     if shift == OFF:
                         item.setBackground(LOCKED_SPLIT_COLOR)
                 else:
