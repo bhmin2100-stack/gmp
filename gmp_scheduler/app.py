@@ -312,6 +312,10 @@ class MainWindow(QMainWindow):
         self.create_schedule_btn.setStyleSheet("font-weight: 700; padding: 8px;")
         self.create_schedule_btn.clicked.connect(self.create_missing_schedule_for_current_page)
         self.create_schedule_btn.hide()
+        self.seed_employees_btn = QPushButton("인원 반영")
+        self.seed_employees_btn.setStyleSheet("font-weight: 700; padding: 8px;")
+        self.seed_employees_btn.clicked.connect(self.seed_employees_for_current_page)
+        self.seed_employees_btn.hide()
 
         self.month_stats_table = QTableWidget()
         self.cumulative_stats_table = QTableWidget()
@@ -1080,10 +1084,12 @@ class MainWindow(QMainWindow):
         self.schedule_tab_container.hide()
         schedule_layout = QVBoxLayout(self.schedule_tab_container)
         schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 이 표 아무 셀에 커서를 두고 Ctrl+V 하세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
+        schedule_layout.addWidget(self.seed_employees_btn)
         schedule_layout.addWidget(self.create_schedule_btn)
         schedule_layout.addWidget(self.schedule_table)
         schedule_layout.addWidget(self.month_split_scroll)
         if hasattr(self, "admin_only_widgets"):
+            self.admin_only_widgets.append(self.seed_employees_btn)
             self.admin_only_widgets.append(self.create_schedule_btn)
 
         stats_tab = QWidget()
@@ -1453,7 +1459,10 @@ class MainWindow(QMainWindow):
 
     def should_offer_schedule_generation(self, result: ScheduleResult, source_name: str) -> bool:
         if self.is_team_source(source_name):
-            return not self.schedule_source_has_saved_data(result.year, result.month, source_name)
+            return (
+                not self.schedule_source_has_saved_data(result.year, result.month, source_name)
+                or not self.result_has_work_marks(result)
+            )
         return not self.result_has_work_marks(result)
 
     def update_create_schedule_button(
@@ -1465,14 +1474,22 @@ class MainWindow(QMainWindow):
             return
         if result is None:
             self.create_schedule_btn.hide()
+            if hasattr(self, "seed_employees_btn"):
+                self.seed_employees_btn.hide()
             return
         target_source = source_name or self.storage_source_name(result)
         should_show = self.should_offer_schedule_generation(result, target_source)
         if self.is_team_source(target_source):
             self.create_schedule_btn.setText(f"{target_source} 근무표 생성")
+            if hasattr(self, "seed_employees_btn"):
+                self.seed_employees_btn.setText(f"{target_source} 인원 반영")
         else:
             self.create_schedule_btn.setText("근무표 생성")
+            if hasattr(self, "seed_employees_btn"):
+                self.seed_employees_btn.setText("인원 반영")
         self.create_schedule_btn.setVisible(should_show)
+        if hasattr(self, "seed_employees_btn"):
+            self.seed_employees_btn.setVisible(should_show)
 
     def seed_employees_from_previous_schedule(self, year: int, month: int, source_name: str) -> List[Employee]:
         seed_year = year
@@ -1529,6 +1546,10 @@ class MainWindow(QMainWindow):
         source_name = self.current_roster_source_name()
         self.generate_schedule(source_name=source_name)
 
+    def seed_employees_for_current_page(self) -> None:
+        source_name = self.current_roster_source_name()
+        self.create_empty_roster_from_previous(self.year_spin.value(), self.month_spin.value(), source_name)
+
     def create_schedule_for_month_source(self, year: int, month: int, source_name: str) -> None:
         view = source_name if self.is_team_source(source_name) else None
         self.set_current_month(year, month)
@@ -1547,6 +1568,50 @@ class MainWindow(QMainWindow):
             lambda _checked=False, y=year, m=month, s=source_name: self.create_schedule_for_month_source(y, m, s)
         )
         return button
+
+    def make_seed_employees_button(self, year: int, month: int, source_name: str) -> QPushButton:
+        button = QPushButton("인원 반영")
+        button.setFixedWidth(90)
+        button.setEnabled(getattr(self, "is_admin", True))
+        button.clicked.connect(
+            lambda _checked=False, y=year, m=month, s=source_name: self.create_empty_roster_from_previous(y, m, s)
+        )
+        return button
+
+    def create_empty_roster_from_previous(self, year: int, month: int, source_name: str) -> None:
+        if not self.require_admin("인원 반영"):
+            return
+        current = self.load_schedule_for_view(year, month, source_name if self.is_team_source(source_name) else None)
+        seeded = self.seed_employees_from_previous_schedule(year, month, source_name)
+        if not seeded:
+            QMessageBox.warning(self, "인원 반영 실패", "이전 달에서 가져올 인원이 없습니다.")
+            return
+        unavailable_by_key = {emp.key: set(emp.unavailable_dates) for emp in current.employees}
+        employees = [
+            Employee(emp.name, emp.employee_id, emp.is_new, unavailable_by_key.get(emp.key, set()), emp.module)
+            for emp in seeded
+        ]
+        dates = month_dates(year, month)
+        empty = ScheduleResult(
+            year,
+            month,
+            employees,
+            {d: {emp.key: OFF for emp in employees} for d in dates},
+            korean_holidays(year),
+            source_name=source_name,
+        )
+        self.apply_split_legacy_prefix(empty)
+        save_schedule(empty, source_name)
+        save_unavailable_days(empty.employees, source_name, year, month)
+        self.result = empty
+        self.set_current_month(year, month)
+        self.employees = list(empty.employees)
+        self.add_employee_rows(self.employees)
+        self.render_schedule_table()
+        self.refresh_validation_and_stats()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
+        QMessageBox.information(self, "인원 반영 완료", f"{year}년 {month}월 {source_name} 표에 이전달 인원 {len(employees)}명을 반영했습니다.")
 
     @staticmethod
     def merge_unavailable_into_employees(
@@ -1580,6 +1645,7 @@ class MainWindow(QMainWindow):
         source_name: Optional[str] = None,
     ) -> bool:
         target_source = source_name or self.source_name_for_view(year, month)
+        has_saved_schedule = self.schedule_source_has_saved_data(year, month, target_source)
         if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == target_source:
             target = self.result
         else:
@@ -1594,6 +1660,12 @@ class MainWindow(QMainWindow):
         if hit <= 0:
             return False
         target.employees = updated
+        if not has_saved_schedule or not self.result_has_work_marks(target):
+            target.schedule = {
+                d: {emp.key: OFF for emp in updated}
+                for d in month_dates(year, month)
+            }
+            save_schedule(target, target_source)
         self.result = target
         self.set_current_month(year, month)
         self.employees = list(updated)
@@ -1871,6 +1943,44 @@ class MainWindow(QMainWindow):
             lambda _checked=False, r=rows: self.apply_module_to_schedule_rows(result, r, "")
         )
 
+    def delete_schedule_rows(self, result: ScheduleResult, rows: List[int]) -> None:
+        if not self.require_admin("인원 삭제"):
+            return
+        valid_rows = sorted({row for row in rows if 0 <= row < len(result.employees)})
+        if not valid_rows:
+            return
+        labels = [
+            result.employees[row].name or result.employees[row].employee_id
+            for row in valid_rows
+        ]
+        answer = QMessageBox.question(
+            self,
+            "인원 삭제",
+            f"선택한 {len(valid_rows)}명을 이 근무표에서 삭제할까요?\n{', '.join(labels[:5])}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        removed_keys = {result.employees[row].key for row in valid_rows}
+        result.employees = [
+            emp for index, emp in enumerate(result.employees)
+            if index not in valid_rows
+        ]
+        for day_map in result.schedule.values():
+            for key in removed_keys:
+                day_map.pop(key, None)
+        if self.result and result.year == self.result.year and result.month == self.result.month and self.storage_source_name(self.result) == self.storage_source_name(result):
+            self.result = result
+            self.employees = list(result.employees)
+            self.add_employee_rows(self.employees)
+            self.render_schedule_table()
+            self.refresh_validation_and_stats()
+        self.save_result_silently(result)
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
+        self.statusBar().showMessage(f"{len(valid_rows)}명 삭제 완료", 4000)
+
     def show_schedule_cell_menu(self, table: QTableWidget, result: Optional[ScheduleResult], pos) -> None:
         if not isinstance(result, ScheduleResult):
             return
@@ -1902,6 +2012,10 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
         if rows:
             self.add_schedule_module_menu(menu, result, rows)
+            menu.addSeparator()
+            menu.addAction("인원 삭제").triggered.connect(
+                lambda _checked=False, r=rows: self.delete_schedule_rows(result, r)
+            )
         menu.exec(table.viewport().mapToGlobal(pos))
 
     def apply_schedule_cells_choice(
@@ -2430,6 +2544,7 @@ class MainWindow(QMainWindow):
             title_row.addWidget(title)
             title_row.addStretch(1)
             if self.should_offer_schedule_generation(result, source_name):
+                title_row.addWidget(self.make_seed_employees_button(year, month, source_name))
                 title_row.addWidget(self.make_schedule_generate_button(year, month, source_name))
             if clearable:
                 clear_btn = QPushButton("이 달 초기화")
