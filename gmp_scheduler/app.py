@@ -335,6 +335,11 @@ class MainWindow(QMainWindow):
         self.stats_mode_combo = QComboBox()
         self.stats_mode_combo.addItems(["월별 필터 통계"])
         self.stats_mode_combo.currentTextChanged.connect(lambda _text: self.on_stats_mode_changed())
+        self.stats_source_combo = QComboBox()
+        self.stats_source_combo.addItem("전체", "")
+        for team in TEAM_VIEWS:
+            self.stats_source_combo.addItem(team, team)
+        self.stats_source_combo.currentIndexChanged.connect(lambda _index: self.render_cumulative_stats())
         self.stats_value_mode_combo = QComboBox()
         self.stats_value_mode_combo.addItems(["갯수", "퍼센트", "갯수+퍼센트"])
         self.stats_value_mode_combo.currentTextChanged.connect(lambda _text: self.render_cumulative_stats())
@@ -1084,6 +1089,8 @@ class MainWindow(QMainWindow):
         stats_tab = QWidget()
         stats_layout = QVBoxLayout(stats_tab)
         period_layout = QHBoxLayout()
+        period_layout.addWidget(QLabel("대상"))
+        period_layout.addWidget(self.stats_source_combo)
         period_layout.addWidget(QLabel("기간"))
         period_layout.addWidget(self.stats_start_year_spin)
         period_layout.addWidget(QLabel("년"))
@@ -2936,6 +2943,11 @@ class MainWindow(QMainWindow):
     def selected_monthly_stats_filters(self) -> set[tuple[str, str]]:
         return set(getattr(self, "monthly_stats_filters", set()))
 
+    def selected_stats_source_name(self) -> str:
+        if not hasattr(self, "stats_source_combo"):
+            return ""
+        return str(self.stats_source_combo.currentData() or "")
+
     def show_monthly_stats_filter_dialog(self) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("월별 필터 설정")
@@ -3011,7 +3023,7 @@ class MainWindow(QMainWindow):
         selected_filters = self.selected_monthly_stats_filters()
         months = self.iter_month_values(start_year, start_month, end_year, end_month)
         month_keys = [f"{year}-{month:02d}" for year, month in months]
-        rows = self.filter_period_rows_for_split(period_assignment_rows(start_year, start_month, end_year, end_month))
+        rows = self.filter_period_rows_for_stats(period_assignment_rows(start_year, start_month, end_year, end_month))
         excluded = excluded_people("월별 필터 통계")
 
         people: Dict[str, Dict[str, str]] = {}
@@ -3247,6 +3259,16 @@ class MainWindow(QMainWindow):
             elif is_team:
                 filtered.append(row)
         return filtered
+
+    def filter_period_rows_for_stats(self, rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        selected_source = self.selected_stats_source_name()
+        rows = self.filter_period_rows_for_split(rows)
+        if not selected_source:
+            return rows
+        return [
+            row for row in rows
+            if str(row.get("source_name") or "") == selected_source
+        ]
 
     def show_stats_table_menu(self, pos) -> None:
         mode = self.stats_mode_combo.currentText()
