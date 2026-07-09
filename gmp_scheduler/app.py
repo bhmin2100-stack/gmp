@@ -42,7 +42,8 @@ from .calendar_settings import add_custom_family_day, add_custom_holiday, remove
 from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .database import delete_month_schedule, load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_html_table, parse_schedule_from_clipboard, parse_schedule_from_html_rows, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard, parse_unavailable_from_html_rows
-from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
+from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
+from .rule_utils import min_rules_for_date, rule_value_for_display, set_rule_value_from_display
 from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
@@ -608,12 +609,12 @@ class MainWindow(QMainWindow):
             widget.setValue(value)
             return widget
 
-        self.weekday_day_spin = spin(self.rules.min_weekday.get(SHIFT_DAY, 1))
-        self.weekday_sw_spin = spin(self.rules.min_weekday.get(SHIFT_SWING, 1))
-        self.weekday_gy_spin = spin(self.rules.min_weekday.get(SHIFT_GY, 1))
-        self.holiday_day_spin = spin(self.rules.min_holiday.get(SHIFT_DAY, 1))
-        self.holiday_sw_spin = spin(self.rules.min_holiday.get(SHIFT_SWING, 1))
-        self.holiday_gy_spin = spin(self.rules.min_holiday.get(SHIFT_DUTY, 1))
+        self.day_type_rule_spins: Dict[tuple[str, str], QSpinBox] = {}
+        for day_type in DAY_TYPE_ORDER:
+            for shift in (SHIFT_DAY, SHIFT_SWING, SHIFT_GY):
+                self.day_type_rule_spins[(day_type, shift)] = spin(
+                    rule_value_for_display(self.rules, day_type, shift)
+                )
         self.max_consecutive_spin = spin(self.rules.max_consecutive_work_days, 1)
         self.max_consecutive_gy_spin = spin(self.rules.max_consecutive_gy, 1)
 
@@ -767,25 +768,30 @@ class MainWindow(QMainWindow):
 
         settings_tab = QWidget()
         settings_layout = QHBoxLayout(settings_tab)
-        weekday_group = QGroupBox("평일 최소 인원")
-        weekday_form = QFormLayout(weekday_group)
-        weekday_form.addRow("D", self.weekday_day_spin)
-        weekday_form.addRow("S", self.weekday_sw_spin)
-        weekday_form.addRow("G/지근", self.weekday_gy_spin)
-
-        holiday_group = QGroupBox("토요일 당직일 최소 인원")
-        holiday_form = QFormLayout(holiday_group)
-        holiday_form.addRow("D", self.holiday_day_spin)
-        holiday_form.addRow("S", self.holiday_sw_spin)
-        holiday_form.addRow("당직", self.holiday_gy_spin)
+        staffing_group = QGroupBox("날짜 유형별 최소 인원")
+        staffing_layout = QVBoxLayout(staffing_group)
+        self.day_type_rule_table = QTableWidget(len(DAY_TYPE_ORDER), 4)
+        self.day_type_rule_table.setHorizontalHeaderLabels(["구분", "Day", "SW", "GY"])
+        self.day_type_rule_table.verticalHeader().setVisible(False)
+        self.day_type_rule_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        for row, day_type in enumerate(DAY_TYPE_ORDER):
+            label_item = QTableWidgetItem(DAY_TYPE_LABELS[day_type])
+            label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
+            self.day_type_rule_table.setItem(row, 0, label_item)
+            for col, shift in enumerate((SHIFT_DAY, SHIFT_SWING, SHIFT_GY), start=1):
+                self.day_type_rule_table.setCellWidget(row, col, self.day_type_rule_spins[(day_type, shift)])
+        self.day_type_rule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.day_type_rule_table.verticalHeader().setDefaultSectionSize(34)
+        self.day_type_rule_table.setFixedHeight(220)
+        staffing_layout.addWidget(self.day_type_rule_table)
+        staffing_layout.addWidget(QLabel("토요일 GY 값은 자동으로 토요일 당직 인원으로 적용됩니다."))
 
         rule_group = QGroupBox("제약")
         rule_form = QFormLayout(rule_group)
         rule_form.addRow("최대 연속 근무", self.max_consecutive_spin)
         rule_form.addRow("최대 연속 GY", self.max_consecutive_gy_spin)
 
-        settings_layout.addWidget(weekday_group)
-        settings_layout.addWidget(holiday_group)
+        settings_layout.addWidget(staffing_group, 2)
         settings_layout.addWidget(rule_group)
         settings_layout.addStretch(1)
         self.settings_tab_index = tabs.addTab(settings_tab, "근무 설정")
@@ -814,15 +820,17 @@ class MainWindow(QMainWindow):
             self.employee_table.setItem(row, 3, QTableWidgetItem(unavailable))
 
     def sync_rules_from_widgets(self) -> None:
+        for (day_type, shift), widget in self.day_type_rule_spins.items():
+            set_rule_value_from_display(self.rules, day_type, shift, widget.value())
         self.rules.min_weekday = {
-            SHIFT_DAY: self.weekday_day_spin.value(),
-            SHIFT_SWING: self.weekday_sw_spin.value(),
-            SHIFT_GY: self.weekday_gy_spin.value(),
+            SHIFT_DAY: self.day_type_rule_spins[(DAY_TYPE_ORDER[0], SHIFT_DAY)].value(),
+            SHIFT_SWING: self.day_type_rule_spins[(DAY_TYPE_ORDER[0], SHIFT_SWING)].value(),
+            SHIFT_GY: self.day_type_rule_spins[(DAY_TYPE_ORDER[0], SHIFT_GY)].value(),
         }
         self.rules.min_holiday = {
-            SHIFT_DAY: self.holiday_day_spin.value(),
-            SHIFT_SWING: self.holiday_sw_spin.value(),
-            SHIFT_DUTY: self.holiday_gy_spin.value(),
+            SHIFT_DAY: self.day_type_rule_spins[(DAY_TYPE_ORDER[3], SHIFT_DAY)].value(),
+            SHIFT_SWING: self.day_type_rule_spins[(DAY_TYPE_ORDER[3], SHIFT_SWING)].value(),
+            SHIFT_DUTY: self.day_type_rule_spins[(DAY_TYPE_ORDER[3], SHIFT_GY)].value(),
         }
         self.rules.max_consecutive_work_days = self.max_consecutive_spin.value()
         self.rules.max_consecutive_gy = self.max_consecutive_gy_spin.value()
@@ -1076,14 +1084,18 @@ class MainWindow(QMainWindow):
 
     def generation_rules_message(self) -> str:
         self.sync_rules_from_widgets()
+        rule_lines = []
+        for day_type in DAY_TYPE_ORDER:
+            day_rules = self.rules.min_by_day_type.get(day_type, {})
+            gy_shift = SHIFT_DUTY if day_type == DAY_TYPE_ORDER[3] else SHIFT_GY
+            gy_label = "당직" if day_type == DAY_TYPE_ORDER[3] else "GY"
+            rule_lines.append(
+                f"- {DAY_TYPE_LABELS[day_type]}: Day {day_rules.get(SHIFT_DAY, 0)}명, "
+                f"SW {day_rules.get(SHIFT_SWING, 0)}명, {gy_label} {day_rules.get(gy_shift, 0)}명"
+            )
         return (
             "아래 규칙으로 현재 월/페이지 근무표를 자동 생성합니다.\n\n"
-            f"- 평일 최소 인원: D {self.rules.min_weekday.get(SHIFT_DAY, 0)}명, "
-            f"S {self.rules.min_weekday.get(SHIFT_SWING, 0)}명, "
-            f"G/지근 {self.rules.min_weekday.get(SHIFT_GY, 0)}명\n"
-            f"- 휴일/주말 최소 인원: D {self.rules.min_holiday.get(SHIFT_DAY, 0)}명, "
-            f"S {self.rules.min_holiday.get(SHIFT_SWING, 0)}명, "
-            f"당직 {self.rules.min_holiday.get(SHIFT_DUTY, 0)}명\n"
+            f"{chr(10).join(rule_lines)}\n"
             f"- 최대 연속 근무: {self.rules.max_consecutive_work_days}일\n"
             f"- 최대 연속 G/당직: {self.rules.max_consecutive_gy}일\n"
             "- 직원별 불가일은 근무 배정에서 제외합니다.\n"
@@ -2221,7 +2233,7 @@ class MainWindow(QMainWindow):
             shift for shift in result.schedule.get(d, {}).values()
             if shift and shift not in (OFF, SHIFT_GY_REST)
         )
-        min_rules = self.rules.min_holiday if is_duty_day(d) else self.rules.min_weekday
+        min_rules = min_rules_for_date(self.rules, d, result.holidays)
         is_duty = is_duty_day(d)
         required = [SHIFT_DAY, SHIFT_SWING, SHIFT_DUTY if is_duty else SHIFT_GY]
 

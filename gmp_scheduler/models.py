@@ -15,6 +15,25 @@ OFF = ""
 WORK_SHIFTS = (SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY)
 REST_SHIFTS = (SHIFT_GY_REST,)
 ALL_SHIFTS = (SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY, SHIFT_GY_REST)
+DAY_TYPE_WEEKDAY = "weekday"
+DAY_TYPE_FAMILY = "family"
+DAY_TYPE_PUBLIC_HOLIDAY = "public_holiday"
+DAY_TYPE_SATURDAY = "saturday"
+DAY_TYPE_SUNDAY = "sunday"
+DAY_TYPE_ORDER = (
+    DAY_TYPE_WEEKDAY,
+    DAY_TYPE_FAMILY,
+    DAY_TYPE_PUBLIC_HOLIDAY,
+    DAY_TYPE_SATURDAY,
+    DAY_TYPE_SUNDAY,
+)
+DAY_TYPE_LABELS = {
+    DAY_TYPE_WEEKDAY: "평일",
+    DAY_TYPE_FAMILY: "페데",
+    DAY_TYPE_PUBLIC_HOLIDAY: "공휴일",
+    DAY_TYPE_SATURDAY: "토요일",
+    DAY_TYPE_SUNDAY: "일요일",
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +59,33 @@ class ShiftRules:
         SHIFT_DAY: 1,
         SHIFT_SWING: 1,
         SHIFT_DUTY: 1,
+    })
+    min_by_day_type: Dict[str, Dict[str, int]] = field(default_factory=lambda: {
+        DAY_TYPE_WEEKDAY: {
+            SHIFT_DAY: 1,
+            SHIFT_SWING: 1,
+            SHIFT_GY: 1,
+        },
+        DAY_TYPE_FAMILY: {
+            SHIFT_DAY: 1,
+            SHIFT_SWING: 1,
+            SHIFT_GY: 1,
+        },
+        DAY_TYPE_PUBLIC_HOLIDAY: {
+            SHIFT_DAY: 1,
+            SHIFT_SWING: 1,
+            SHIFT_GY: 1,
+        },
+        DAY_TYPE_SATURDAY: {
+            SHIFT_DAY: 1,
+            SHIFT_SWING: 1,
+            SHIFT_DUTY: 1,
+        },
+        DAY_TYPE_SUNDAY: {
+            SHIFT_DAY: 1,
+            SHIFT_SWING: 1,
+            SHIFT_GY: 1,
+        },
     })
     max_consecutive_work_days: int = 5
     max_consecutive_gy: int = 6

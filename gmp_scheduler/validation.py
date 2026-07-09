@@ -4,8 +4,9 @@ from collections import Counter, defaultdict
 from datetime import date, timedelta
 from typing import Dict, List, Set
 
-from .calendar_utils import is_duty_day, is_holiday_or_weekend, month_dates
+from .calendar_utils import is_duty_day, month_dates
 from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ShiftRules
+from .rule_utils import min_rules_for_date
 from .stats import compute_stats
 
 
@@ -25,7 +26,7 @@ def validate_schedule(
             shift for shift in schedule.get(d, {}).values()
             if shift and shift not in (OFF, SHIFT_GY_REST)
         )
-        min_rules = rules.min_holiday if is_duty_day(d) else rules.min_weekday
+        min_rules = min_rules_for_date(rules, d, holidays)
         for shift, minimum in min_rules.items():
             actual = counts[shift]
             if actual < minimum:

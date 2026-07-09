@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
+from .rule_utils import min_rules_for_date
 from .schedule_utils import GY_BLOCK_DAYS
 from .validation import validate_schedule
 
@@ -181,7 +182,7 @@ def generate_month_schedule(
         return True
 
     for d in dates:
-        min_rules = rules.min_holiday if is_duty_day(d) else rules.min_weekday
+        min_rules = min_rules_for_date(rules, d, holidays)
         if not is_duty_day(d) and not has_gy_coverage(d):
             assign_gy_block_start(d)
         day_swing_order = [shift for shift in (SHIFT_DAY, SHIFT_SWING) if shift in min_rules]
