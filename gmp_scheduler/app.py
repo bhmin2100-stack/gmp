@@ -569,6 +569,41 @@ class MainWindow(QMainWindow):
             ]
         self.statusBar().showMessage(f"{len(rows)}명 모듈 설정 완료", 4000)
 
+    def apply_module_to_schedule_rows(self, result: ScheduleResult, rows: List[int], module_name: str) -> None:
+        if hasattr(self, "require_admin") and not self.require_admin("모듈 설정"):
+            return
+        if not rows:
+            return
+        keys = {
+            result.employees[row].key
+            for row in rows
+            if 0 <= row < len(result.employees)
+        }
+        if not keys:
+            return
+        for row in range(self.employee_table.rowCount()):
+            name = self._cell_text(self.employee_table, row, 0)
+            employee_no = self._cell_text(self.employee_table, row, 1)
+            if f"{name}|{employee_no}" in keys:
+                self.employee_table.setItem(row, 4, QTableWidgetItem(module_name))
+        self.employees = [
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module)
+            for emp in self.collect_employees()
+        ]
+        result.employees = [
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module)
+            for emp in result.employees
+        ]
+        if self.result and result.year == self.result.year and result.month == self.result.month:
+            self.result.employees = [
+                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module)
+                for emp in self.result.employees
+            ]
+        self.save_result_silently(result)
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
+        self.statusBar().showMessage(f"{len(keys)}명 모듈 설정 완료", 4000)
+
     def clear_module_from_employees(self, module_name: str) -> None:
         changed = False
         for row in range(self.employee_table.rowCount()):
@@ -1735,32 +1770,59 @@ class MainWindow(QMainWindow):
             return [clicked]
         return selected or [clicked]
 
+    def schedule_context_rows(self, table: QTableWidget, pos) -> List[int]:
+        index = table.indexAt(pos)
+        if not index.isValid():
+            return []
+        clicked_row = index.row()
+        selected_rows = sorted({idx.row() for idx in table.selectedIndexes() if idx.row() >= 0})
+        if clicked_row not in selected_rows:
+            return [clicked_row]
+        return selected_rows or [clicked_row]
+
+    def add_schedule_module_menu(self, menu: QMenu, result: ScheduleResult, rows: List[int]) -> None:
+        module_menu = menu.addMenu("모듈 설정")
+        for module_name in self.module_names:
+            module_menu.addAction(module_name).triggered.connect(
+                lambda _checked=False, r=rows, m=module_name: self.apply_module_to_schedule_rows(result, r, m)
+            )
+        if self.module_names:
+            module_menu.addSeparator()
+        module_menu.addAction("모듈 없음").triggered.connect(
+            lambda _checked=False, r=rows: self.apply_module_to_schedule_rows(result, r, "")
+        )
+
     def show_schedule_cell_menu(self, table: QTableWidget, result: Optional[ScheduleResult], pos) -> None:
         if not isinstance(result, ScheduleResult):
             return
         cells = self.schedule_context_cells(table, pos)
-        if not cells:
+        rows = self.schedule_context_rows(table, pos)
+        if not cells and not rows:
             return
         menu = QMenu(self)
-        menu.addAction("데이 (D)").triggered.connect(
-            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_DAY)
-        )
-        menu.addAction("스윙 (S)").triggered.connect(
-            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_SWING)
-        )
-        menu.addAction("GY/지근").triggered.connect(
-            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_GY)
-        )
-        menu.addAction("당직").triggered.connect(
-            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_DUTY)
-        )
-        menu.addSeparator()
-        menu.addAction("근무불가").triggered.connect(
-            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, None, mark_unavailable=True)
-        )
-        menu.addAction("비우기").triggered.connect(
-            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, OFF)
-        )
+        if cells:
+            menu.addAction("데이 (D)").triggered.connect(
+                lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_DAY)
+            )
+            menu.addAction("스윙 (S)").triggered.connect(
+                lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_SWING)
+            )
+            menu.addAction("GY/지근").triggered.connect(
+                lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_GY)
+            )
+            menu.addAction("당직").triggered.connect(
+                lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_DUTY)
+            )
+            menu.addSeparator()
+            menu.addAction("근무불가").triggered.connect(
+                lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, None, mark_unavailable=True)
+            )
+            menu.addAction("비우기").triggered.connect(
+                lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, OFF)
+            )
+            menu.addSeparator()
+        if rows:
+            self.add_schedule_module_menu(menu, result, rows)
         menu.exec(table.viewport().mapToGlobal(pos))
 
     def apply_schedule_cells_choice(
