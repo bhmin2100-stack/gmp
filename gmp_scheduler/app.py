@@ -5,10 +5,11 @@ import re
 import json
 from collections import Counter
 from datetime import date, timedelta
+from html import escape
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QDate, QEvent, QTimer, Qt
+from PySide6.QtCore import QDate, QEvent, QMimeData, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -61,6 +62,7 @@ SHIFT_COLORS = {
     "": QColor("#ffffff"),
 }
 WARNING_COLOR = QColor("#f4cccc")
+UNAVAILABLE_COLOR = QColor("#e7e6e6")
 HOLIDAY_HEADER_COLOR = QColor("#f4cccc")
 FAMILY_HEADER_COLOR = QColor("#ffd966")
 STAFFING_OK_COLOR = QColor("#008000")
@@ -1143,14 +1145,16 @@ class MainWindow(QMainWindow):
         table.blockSignals(True)
         for r_offset, values in enumerate(matrix):
             row = start_row + r_offset
-            if row >= table.rowCount():
+            if row >= table.rowCount() or row >= len(result.employees):
                 continue
+            emp = result.employees[row]
             for c_offset, raw in enumerate(values):
                 col = start_col + c_offset
                 if col < 2 or col >= table.columnCount():
                     continue
                 day_index = col - 2
-                if day_index < 0 or day_index >= len(dates) or self.is_locked_split_cell(result, dates[day_index]):
+                d = dates[day_index] if 0 <= day_index < len(dates) else None
+                if d is None or self.is_locked_split_cell(result, d):
                     continue
                 shift = normalize_shift_code(raw)
                 item = table.item(row, col)
@@ -1159,7 +1163,7 @@ class MainWindow(QMainWindow):
                     table.setItem(row, col, item)
                 item.setText("" if shift == OFF else shift)
                 item.setTextAlignment(Qt.AlignCenter)
-                item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                self.apply_schedule_cell_background(item, result, emp, d, shift)
         table.blockSignals(False)
         self.sync_result_from_table(table, result)
         self.save_result_silently(result)
@@ -1204,7 +1208,7 @@ class MainWindow(QMainWindow):
                 table.setItem(row, col, item)
             item.setText("")
             item.setTextAlignment(Qt.AlignCenter)
-            item.setBackground(SHIFT_COLORS.get(OFF, QColor("#ffffff")))
+            self.apply_schedule_cell_background(item, result, emp, d, OFF)
         table.blockSignals(False)
 
         self.save_result_silently(result)
@@ -1243,6 +1247,16 @@ class MainWindow(QMainWindow):
     def copy_schedule_selection_to_clipboard(self) -> None:
         self.copy_table_selection_to_clipboard(self.schedule_table, skip_columns=2)
 
+    @staticmethod
+    def table_item_background_hex(item: Optional[QTableWidgetItem]) -> str:
+        if item is None:
+            return "#ffffff"
+        brush = item.background()
+        if brush.style() == Qt.NoBrush:
+            return "#ffffff"
+        color = brush.color()
+        return color.name() if color.isValid() else "#ffffff"
+
     def copy_table_selection_to_clipboard(self, table: QTableWidget, skip_columns: int = 0) -> None:
         indexes = [
             index for index in table.selectedIndexes()
@@ -1250,7 +1264,15 @@ class MainWindow(QMainWindow):
         ]
         if not indexes:
             item = table.currentItem()
-            QApplication.clipboard().setText(item.text() if item else "")
+            text = item.text() if item else ""
+            color = self.table_item_background_hex(item)
+            mime = QMimeData()
+            mime.setText(text)
+            mime.setHtml(
+                f'<html><body><table><tr><td style="background-color:{color}">'
+                f"{escape(text)}</td></tr></table></body></html>"
+            )
+            QApplication.clipboard().setMimeData(mime)
             return
         top = min(index.row() for index in indexes)
         bottom = max(index.row() for index in indexes)
@@ -1258,16 +1280,28 @@ class MainWindow(QMainWindow):
         right = max(index.column() for index in indexes)
         selected_cells = {(index.row(), index.column()) for index in indexes}
         lines = []
+        html_rows = []
         for row in range(top, bottom + 1):
             values = []
+            html_cells = []
             for col in range(left, right + 1):
                 if (row, col) in selected_cells:
                     item = table.item(row, col)
-                    values.append(item.text() if item else "")
+                    text = item.text() if item else ""
+                    color = self.table_item_background_hex(item)
                 else:
-                    values.append("")
+                    text = ""
+                    color = "#ffffff"
+                values.append(text)
+                html_cells.append(
+                    f'<td style="background-color:{color};text-align:center">{escape(text)}</td>'
+                )
             lines.append("\t".join(values))
-        QApplication.clipboard().setText("\n".join(lines))
+            html_rows.append("<tr>" + "".join(html_cells) + "</tr>")
+        mime = QMimeData()
+        mime.setText("\n".join(lines))
+        mime.setHtml("<html><body><table>" + "".join(html_rows) + "</table></body></html>")
+        QApplication.clipboard().setMimeData(mime)
 
     def paste_schedule_cells_from_clipboard(self) -> None:
         if not self.result:
@@ -1281,8 +1315,9 @@ class MainWindow(QMainWindow):
         self._updating_table = True
         for r_offset, values in enumerate(matrix):
             row = start_row + r_offset
-            if row >= self.schedule_table.rowCount():
+            if row >= self.schedule_table.rowCount() or row >= len(self.result.employees):
                 continue
+            emp = self.result.employees[row]
             for c_offset, raw in enumerate(values):
                 # Preserve blank cells in copied ranges, but ignore whitespace-only
                 # fragments produced by some clipboard formats.
@@ -1294,7 +1329,8 @@ class MainWindow(QMainWindow):
                 if col < 2 or col >= self.schedule_table.columnCount():
                     continue
                 day_index = col - 2
-                if day_index < 0 or day_index >= len(dates) or self.is_locked_split_cell(self.result, dates[day_index]):
+                d = dates[day_index] if 0 <= day_index < len(dates) else None
+                if d is None or self.is_locked_split_cell(self.result, d):
                     continue
                 item = self.schedule_table.item(row, col)
                 if item is None:
@@ -1302,7 +1338,7 @@ class MainWindow(QMainWindow):
                     self.schedule_table.setItem(row, col, item)
                 item.setText("" if shift == OFF else shift)
                 item.setTextAlignment(Qt.AlignCenter)
-                item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                self.apply_schedule_cell_background(item, self.result, emp, d, shift)
         self._updating_table = False
         self.sync_schedule_from_table()
         self.render_schedule_table()
@@ -1513,14 +1549,12 @@ class MainWindow(QMainWindow):
                 table.setItem(row, 1, id_item)
                 for col, d in enumerate(dates, start=2):
                     shift = result.schedule.get(d, {}).get(emp.key, OFF)
-                    cell = QTableWidgetItem(shift)
+                    cell = QTableWidgetItem("" if shift == OFF else shift)
                     cell.setTextAlignment(Qt.AlignCenter)
-                    cell.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                    self.apply_schedule_cell_background(cell, result, emp, d, shift)
                     if self.is_locked_split_cell(result, d):
                         cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                         cell.setToolTip("분할 시작월 전 기존 근무표입니다.")
-                        if shift == OFF:
-                            cell.setBackground(LOCKED_SPLIT_COLOR)
                     else:
                         cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                     table.setItem(row, col, cell)
@@ -1638,12 +1672,10 @@ class MainWindow(QMainWindow):
                 value = "" if shift == OFF else shift
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
-                item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                self.apply_schedule_cell_background(item, self.result, emp, d, shift)
                 if self.is_locked_split_cell(self.result, d):
                     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     item.setToolTip("분할 시작월 전 기존 근무표입니다.")
-                    if shift == OFF:
-                        item.setBackground(LOCKED_SPLIT_COLOR)
                 else:
                     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                 self.schedule_table.setItem(row, col, item)
@@ -1660,6 +1692,10 @@ class MainWindow(QMainWindow):
         if day_index < 0 or day_index >= len(dates) or self.is_locked_split_cell(self.result, dates[day_index]):
             self.render_schedule_table()
             return
+        if row < 0 or row >= len(self.result.employees):
+            return
+        emp = self.result.employees[row]
+        d = dates[day_index]
         item = self.schedule_table.item(row, col)
         if not item:
             return
@@ -1667,7 +1703,7 @@ class MainWindow(QMainWindow):
         normalized = self.normalize_shift(text)
         if normalized != text:
             item.setText("" if normalized == OFF else normalized)
-        item.setBackground(SHIFT_COLORS.get(normalized, QColor("#ffffff")))
+        self.apply_schedule_cell_background(item, self.result, emp, d, normalized)
         self.sync_schedule_from_table()
         self.render_schedule_table()
         self.refresh_validation_and_stats()
@@ -1684,19 +1720,24 @@ class MainWindow(QMainWindow):
             item = table.item(row, col)
             if item and 0 <= row < len(result.employees):
                 emp = result.employees[row]
-                shift = result.schedule.get(dates[day_index], {}).get(emp.key, OFF)
+                d = dates[day_index]
+                shift = result.schedule.get(d, {}).get(emp.key, OFF)
                 table.blockSignals(True)
                 item.setText("" if shift == OFF else shift)
-                item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                self.apply_schedule_cell_background(item, result, emp, d, shift)
                 table.blockSignals(False)
             return
+        if row < 0 or row >= len(result.employees):
+            return
+        emp = result.employees[row]
+        d = dates[day_index]
         item = table.item(row, col)
         if not item:
             return
         normalized = self.normalize_shift(item.text())
         table.blockSignals(True)
         item.setText("" if normalized == OFF else normalized)
-        item.setBackground(SHIFT_COLORS.get(normalized, QColor("#ffffff")))
+        self.apply_schedule_cell_background(item, result, emp, d, normalized)
         table.blockSignals(False)
         self.sync_result_from_table(table, result)
         self.save_result_silently(result)
@@ -1710,6 +1751,37 @@ class MainWindow(QMainWindow):
     @staticmethod
     def normalize_shift(text: str) -> str:
         return normalize_shift_code(text)
+
+    def schedule_cell_background(
+        self,
+        result: ScheduleResult,
+        emp: Employee,
+        d: date,
+        shift: str,
+        *,
+        include_validation: bool = False,
+    ) -> QColor:
+        if include_validation and shift not in (OFF, SHIFT_GY_REST) and d in emp.unavailable_dates:
+            return WARNING_COLOR
+        if shift == OFF and d in emp.unavailable_dates:
+            return UNAVAILABLE_COLOR
+        if self.is_locked_split_cell(result, d) and shift == OFF:
+            return LOCKED_SPLIT_COLOR
+        return SHIFT_COLORS.get(shift, QColor("#ffffff"))
+
+    def apply_schedule_cell_background(
+        self,
+        item: QTableWidgetItem,
+        result: ScheduleResult,
+        emp: Employee,
+        d: date,
+        shift: str,
+        *,
+        include_validation: bool = False,
+    ) -> None:
+        item.setBackground(
+            self.schedule_cell_background(result, emp, d, shift, include_validation=include_validation)
+        )
 
     def sync_result_from_table(self, table: QTableWidget, result: ScheduleResult) -> None:
         dates = month_dates(result.year, result.month)
@@ -2244,12 +2316,14 @@ class MainWindow(QMainWindow):
                 if not item:
                     continue
                 shift = self.normalize_shift(item.text())
-                if self.is_locked_split_cell(self.result, d) and shift == OFF:
-                    item.setBackground(LOCKED_SPLIT_COLOR)
-                else:
-                    item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
-                if shift not in (OFF, SHIFT_GY_REST) and d in emp.unavailable_dates:
-                    item.setBackground(WARNING_COLOR)
+                self.apply_schedule_cell_background(
+                    item,
+                    self.result,
+                    emp,
+                    d,
+                    shift,
+                    include_validation=True,
+                )
 
 
 def run() -> None:

@@ -22,6 +22,7 @@ SHIFT_FILLS = {
     OFF: "FFFFFF",
     "": "FFFFFF",
 }
+UNAVAILABLE_FILL = "E7E6E6"
 
 
 def parse_date(value, default_year: Optional[int] = None, default_month: Optional[int] = None) -> Optional[date]:
@@ -396,7 +397,8 @@ def parse_unavailable_from_html_rows(rows: List[List[dict]], year: int, month: i
         employee_no = str(row[id_col].get("text", "")).strip() if id_col < len(row) else ""
         dates: Set[date] = set()
         for day, col in day_cols.items():
-            if col < len(row) and is_gray_rgb(_cell_color_from_html_cell(row[col])):
+            text = str(row[col].get("text", "")).strip() if col < len(row) else ""
+            if col < len(row) and not text and is_gray_rgb(_cell_color_from_html_cell(row[col])):
                 dates.add(valid_dates[day])
         if dates:
             key = f"{name}|{employee_no}"
@@ -613,7 +615,9 @@ def import_unavailable_from_gray_excel(path: str | Path, year: int, month: int) 
         employee_no = str(row[id_col].value).strip() if id_col < len(row) and row[id_col].value is not None else ""
         dates: Set[date] = set()
         for day, col in day_cols.items():
-            if col < len(row) and is_gray_fill(row[col]):
+            cell_value = row[col].value if col < len(row) else None
+            text = "" if cell_value is None else str(cell_value).strip()
+            if col < len(row) and not text and is_gray_fill(row[col]):
                 dates.add(valid_dates[day])
         if dates:
             key = f"{name}|{employee_no}"
@@ -717,7 +721,8 @@ def export_schedule_to_excel(result: ScheduleResult, path: str | Path) -> None:
             shift = result.schedule.get(d, {}).get(emp.key, OFF)
             cell = ws.cell(row=row_idx, column=col_idx, value=shift)
             cell.alignment = Alignment(horizontal="center")
-            cell.fill = PatternFill("solid", fgColor=SHIFT_FILLS.get(shift, "FFFFFF"))
+            fill = UNAVAILABLE_FILL if shift == OFF and d in emp.unavailable_dates else SHIFT_FILLS.get(shift, "FFFFFF")
+            cell.fill = PatternFill("solid", fgColor=fill)
             cell.border = border
 
     for col in range(1, len(dates) + 3):
