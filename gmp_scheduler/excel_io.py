@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
+from .calendar_utils import is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult
 from .schedule_utils import expand_gy_blocks
 from .stats import STAT_HEADERS, averages, compute_stats
@@ -23,6 +23,8 @@ SHIFT_FILLS = {
     "": "FFFFFF",
 }
 UNAVAILABLE_FILL = "E7E6E6"
+FAMILY_FILL = "D9EAD3"
+HOLIDAY_FILL = "FCE4D6"
 
 
 def parse_date(value, default_year: Optional[int] = None, default_month: Optional[int] = None) -> Optional[date]:
@@ -298,7 +300,7 @@ def is_gray_rgb(rgb: Optional[tuple[int, int, int]]) -> bool:
     r, g, b = rgb
     if (r, g, b) in ((255, 255, 255), (0, 0, 0)):
         return False
-    return max(r, g, b) - min(r, g, b) <= 22 and 65 <= (r + g + b) / 3 <= 240
+    return max(r, g, b) - min(r, g, b) <= 10 and 65 <= (r + g + b) / 3 <= 245
 
 
 def is_blue_rgb(rgb: Optional[tuple[int, int, int]]) -> bool:
@@ -590,16 +592,11 @@ def is_gray_fill(cell) -> bool:
         return False
     rgb = _rgb_from_openpyxl_color(getattr(fill, "fgColor", None)) or _rgb_from_openpyxl_color(getattr(fill, "start_color", None))
     if rgb is None:
-        # Theme colors are hard to resolve without workbook theme parsing. If a schedule cell
-        # has any non-empty fill but no RGB, treat it as marked unavailable.
-        fg = getattr(fill, "fgColor", None)
-        if fg and getattr(fg, "type", None) == "theme":
-            return True
         return False
     r, g, b = rgb
     if (r, g, b) in ((255, 255, 255), (0, 0, 0)):
         return False
-    return max(r, g, b) - min(r, g, b) <= 18 and 70 <= (r + g + b) / 3 <= 235
+    return max(r, g, b) - min(r, g, b) <= 10 and 70 <= (r + g + b) / 3 <= 245
 
 
 def is_blue_fill(cell) -> bool:
@@ -787,8 +784,10 @@ def export_schedule_to_excel(result: ScheduleResult, path: str | Path) -> None:
         c.font = Font(bold=True)
         c = ws.cell(row=2, column=idx, value=d.day)
         c.alignment = Alignment(horizontal="center")
-        if is_holiday_or_weekend(d, result.holidays):
-            c.fill = PatternFill("solid", fgColor="F4CCCC")
+        if is_family_day(d):
+            c.fill = PatternFill("solid", fgColor=FAMILY_FILL)
+        elif is_holiday_or_weekend(d, result.holidays):
+            c.fill = PatternFill("solid", fgColor=HOLIDAY_FILL)
 
     for row_idx, emp in enumerate(result.employees, start=3):
         ws.cell(row=row_idx, column=1, value=emp.name)
@@ -797,7 +796,16 @@ def export_schedule_to_excel(result: ScheduleResult, path: str | Path) -> None:
             shift = result.schedule.get(d, {}).get(emp.key, OFF)
             cell = ws.cell(row=row_idx, column=col_idx, value=shift)
             cell.alignment = Alignment(horizontal="center")
-            fill = UNAVAILABLE_FILL if d in emp.unavailable_dates else SHIFT_FILLS.get(shift, "FFFFFF")
+            if shift not in (OFF, ""):
+                fill = SHIFT_FILLS.get(shift, "FFFFFF")
+            elif d in emp.unavailable_dates:
+                fill = UNAVAILABLE_FILL
+            elif is_family_day(d):
+                fill = FAMILY_FILL
+            elif is_holiday_or_weekend(d, result.holidays):
+                fill = HOLIDAY_FILL
+            else:
+                fill = SHIFT_FILLS.get(shift, "FFFFFF")
             cell.fill = PatternFill("solid", fgColor=fill)
             cell.border = border
 

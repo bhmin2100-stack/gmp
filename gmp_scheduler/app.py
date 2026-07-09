@@ -70,8 +70,8 @@ SHIFT_COLORS = {
 }
 WARNING_COLOR = QColor("#f4cccc")
 UNAVAILABLE_COLOR = QColor("#e7e6e6")
-HOLIDAY_HEADER_COLOR = QColor("#f4cccc")
-FAMILY_HEADER_COLOR = QColor("#ffd966")
+HOLIDAY_HEADER_COLOR = QColor("#fce4d6")
+FAMILY_HEADER_COLOR = QColor("#d9ead3")
 STAFFING_OK_COLOR = QColor("#008000")
 OVERVIEW_START_YEAR = 2025
 NAME_COL_WIDTH = 74
@@ -2794,10 +2794,16 @@ class MainWindow(QMainWindow):
         *,
         include_validation: bool = False,
     ) -> QColor:
+        if shift not in (OFF, ""):
+            return SHIFT_COLORS.get(shift, QColor("#ffffff"))
         if d in emp.unavailable_dates:
             return UNAVAILABLE_COLOR
         if self.is_locked_split_cell(result, d) and shift == OFF:
             return LOCKED_SPLIT_COLOR
+        if is_family_day(d):
+            return FAMILY_HEADER_COLOR
+        if is_holiday_or_weekend(d, result.holidays):
+            return HOLIDAY_HEADER_COLOR
         return SHIFT_COLORS.get(shift, QColor("#ffffff"))
 
     def apply_schedule_cell_background(
