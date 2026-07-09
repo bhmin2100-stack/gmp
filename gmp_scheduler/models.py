@@ -64,3 +64,4 @@ class ScheduleResult:
     schedule: ScheduleMap
     holidays: Set[date]
     warnings: List[str] = field(default_factory=list)
+    source_name: str = ""

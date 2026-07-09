@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import re
+import json
 from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
@@ -70,6 +71,13 @@ DAY_COL_WIDTH = 34
 COMPACT_ROW_HEIGHT = 20
 COMPACT_FONT_SIZE = 8
 HEADER_FONT_SIZE = 10
+TEAM_SPLIT_SETTINGS_PATH = Path("team_split_settings.json")
+VIEW_LEGACY = "legacy"
+VIEW_V11 = "V11"
+VIEW_V12 = "V12"
+TEAM_VIEWS = (VIEW_V11, VIEW_V12)
+LEGACY_LABEL = "기존"
+LOCKED_SPLIT_COLOR = QColor("#f3f3f3")
 
 
 class PasteTableWidget(QTableWidget):
@@ -230,6 +238,9 @@ class MainWindow(QMainWindow):
         self.rules = ShiftRules()
         self._updating_table = False
         self._year_overview_refresh_pending = False
+        self._suppress_month_reload = False
+        self._loading_split_controls = False
+        self._schedule_header_menu_connected = False
 
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2100)
@@ -237,6 +248,17 @@ class MainWindow(QMainWindow):
         self.month_spin = QSpinBox()
         self.month_spin.setRange(1, 12)
         self.month_spin.setValue(date.today().month)
+
+        self.split_enabled_check = QCheckBox("V11/V12 분할 사용")
+        self.split_date_edit = QDateEdit()
+        self.split_date_edit.setCalendarPopup(True)
+        self.split_date_edit.setDate(QDate(date.today().year, date.today().month, date.today().day))
+        self.schedule_view_combo = QComboBox()
+        self.schedule_view_combo.addItem("기존", VIEW_LEGACY)
+        self.schedule_view_combo.addItem("V11", VIEW_V11)
+        self.schedule_view_combo.addItem("V12", VIEW_V12)
+        self.schedule_source_label = QLabel("")
+        self.load_team_split_settings_into_controls()
 
         self._build_rule_widgets()
 
@@ -293,28 +315,257 @@ class MainWindow(QMainWindow):
         self.calendar_date_edit.setDate(QDate(today.year, today.month, today.day))
 
         self._build_ui()
+        self.year_spin.valueChanged.connect(lambda _value: self.load_selected_month_from_db())
+        self.month_spin.valueChanged.connect(lambda _value: self.load_selected_month_from_db())
+        self.split_enabled_check.toggled.connect(lambda _checked: self.on_team_split_controls_changed())
+        self.split_date_edit.dateChanged.connect(lambda _date: self.on_team_split_controls_changed())
+        self.schedule_view_combo.currentIndexChanged.connect(lambda _index: self.on_team_split_controls_changed())
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
-        self.employees = []
-        current_year = self.year_spin.value()
-        current_month = self.month_spin.value()
-        loaded = load_schedule_result(current_year, current_month)
-        if loaded:
-            self.result = loaded
-            self.apply_previous_month_gy_carryover(self.result)
-            self.employees = list(loaded.employees)
+        self.load_selected_month_from_db(refresh_overview=False)
+        self.render_year_overview()
+
+    @staticmethod
+    def legacy_source_name(year: int, month: int) -> str:
+        return f"{year}-{month:02d}"
+
+    @staticmethod
+    def is_team_source(source_name: str) -> bool:
+        return source_name in TEAM_VIEWS
+
+    def load_team_split_settings_into_controls(self) -> None:
+        self._loading_split_controls = True
+        try:
+            settings: Dict[str, object] = {}
+            if TEAM_SPLIT_SETTINGS_PATH.exists():
+                try:
+                    settings = json.loads(TEAM_SPLIT_SETTINGS_PATH.read_text(encoding="utf-8"))
+                except Exception:
+                    settings = {}
+            enabled = bool(settings.get("enabled", False))
+            split_date_text = str(settings.get("split_date") or date.today().isoformat())
+            try:
+                split_date = date.fromisoformat(split_date_text)
+            except ValueError:
+                split_date = date.today()
+            view = str(settings.get("view") or VIEW_LEGACY)
+            if view not in (VIEW_LEGACY, *TEAM_VIEWS):
+                view = VIEW_LEGACY
+
+            self.split_enabled_check.setChecked(enabled)
+            self.split_date_edit.setDate(QDate(split_date.year, split_date.month, split_date.day))
+            index = self.schedule_view_combo.findData(view)
+            self.schedule_view_combo.setCurrentIndex(max(0, index))
+        finally:
+            self._loading_split_controls = False
+
+    def save_team_split_settings(self) -> None:
+        split_date = self.split_date()
+        settings = {
+            "enabled": self.split_enabled_check.isChecked(),
+            "split_date": split_date.isoformat(),
+            "view": self.selected_schedule_view(),
+        }
+        TEAM_SPLIT_SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def selected_schedule_view(self) -> str:
+        value = self.schedule_view_combo.currentData()
+        if value in (VIEW_LEGACY, *TEAM_VIEWS):
+            return str(value)
+        return VIEW_LEGACY
+
+    def split_date(self) -> date:
+        qdate = self.split_date_edit.date()
+        return date(qdate.year(), qdate.month(), qdate.day())
+
+    def enabled_split_date(self) -> Optional[date]:
+        return self.split_date() if self.split_enabled_check.isChecked() else None
+
+    def month_has_team_dates(self, year: int, month: int) -> bool:
+        split = self.enabled_split_date()
+        return bool(split and month_dates(year, month)[-1] >= split)
+
+    def source_name_for_view(self, year: int, month: int, view: Optional[str] = None) -> str:
+        selected = view or self.selected_schedule_view()
+        if selected in TEAM_VIEWS and self.month_has_team_dates(year, month):
+            return selected
+        return self.legacy_source_name(year, month)
+
+    def source_label_for_view(self, year: int, month: int, view: Optional[str] = None) -> str:
+        source_name = self.source_name_for_view(year, month, view)
+        if source_name in TEAM_VIEWS:
+            split = self.enabled_split_date()
+            dates = month_dates(year, month)
+            if split and dates[0] < split <= dates[-1]:
+                return f"{source_name} (기준일 전 기존 표시)"
+            return source_name
+        return LEGACY_LABEL
+
+    def update_schedule_source_status(self) -> None:
+        if not hasattr(self, "schedule_source_label"):
+            return
+        year = self.year_spin.value()
+        month = self.month_spin.value()
+        label = self.source_label_for_view(year, month)
+        if self.split_enabled_check.isChecked():
+            self.schedule_source_label.setText(f"보기/저장: {label} · 기준일 {self.split_date().isoformat()}")
         else:
-            self.result = ScheduleResult(
-                current_year,
-                current_month,
-                self.employees,
-                {d: {} for d in month_dates(current_year, current_month)},
-                korean_holidays(current_year),
-            )
+            self.schedule_source_label.setText(f"보기/저장: {label} · 분할 미사용")
+
+    def set_current_month(self, year: int, month: int) -> None:
+        self._suppress_month_reload = True
+        try:
+            self.year_spin.setValue(year)
+            self.month_spin.setValue(month)
+        finally:
+            self._suppress_month_reload = False
+
+    def empty_schedule_result(self, year: int, month: int, source_name: Optional[str] = None) -> ScheduleResult:
+        employees: List[Employee] = []
+        return ScheduleResult(
+            year,
+            month,
+            employees,
+            {d: {} for d in month_dates(year, month)},
+            korean_holidays(year),
+            source_name=source_name or self.source_name_for_view(year, month),
+        )
+
+    @staticmethod
+    def clone_schedule_result(result: ScheduleResult, source_name: Optional[str] = None) -> ScheduleResult:
+        employees = [
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates))
+            for emp in result.employees
+        ]
+        schedule = {
+            d: dict(day_map)
+            for d, day_map in result.schedule.items()
+        }
+        return ScheduleResult(
+            result.year,
+            result.month,
+            employees,
+            schedule,
+            set(result.holidays),
+            list(result.warnings),
+            source_name if source_name is not None else result.source_name,
+        )
+
+    def load_legacy_schedule_result(self, year: int, month: int) -> Optional[ScheduleResult]:
+        legacy_name = self.legacy_source_name(year, month)
+        result = load_schedule_result(year, month, source_name=legacy_name, fallback_source_names=[""])
+        if result and not result.source_name:
+            result.source_name = legacy_name
+        return result
+
+    def load_existing_schedule_for_source(self, year: int, month: int, source_name: str) -> Optional[ScheduleResult]:
+        if self.is_team_source(source_name) and self.month_has_team_dates(year, month):
+            return load_schedule_result(year, month, source_name=source_name)
+        return self.load_legacy_schedule_result(year, month)
+
+    def load_schedule_for_view(self, year: int, month: int, view: Optional[str] = None) -> ScheduleResult:
+        source_name = self.source_name_for_view(year, month, view)
+        if self.is_team_source(source_name):
+            loaded = load_schedule_result(year, month, source_name=source_name)
+            if loaded:
+                result = loaded
+            else:
+                legacy = self.load_legacy_schedule_result(year, month)
+                result = self.clone_schedule_result(legacy, source_name) if legacy else self.empty_schedule_result(year, month, source_name)
+            result.source_name = source_name
+            self.apply_split_legacy_prefix(result)
+            return result
+
+        loaded = self.load_legacy_schedule_result(year, month)
+        if loaded:
+            return loaded
+        return self.empty_schedule_result(year, month, source_name)
+
+    def apply_split_legacy_prefix(self, result: ScheduleResult) -> None:
+        split = self.enabled_split_date()
+        if not split or not self.is_team_source(result.source_name):
+            return
+        dates = month_dates(result.year, result.month)
+        if dates[0] >= split:
+            return
+        legacy = self.load_legacy_schedule_result(result.year, result.month)
+        if not legacy:
+            return
+
+        employee_by_key = {emp.key: emp for emp in result.employees}
+        for emp in legacy.employees:
+            if emp.key not in employee_by_key:
+                copied = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates))
+                result.employees.append(copied)
+                employee_by_key[copied.key] = copied
+
+        for d in dates:
+            day_map = result.schedule.setdefault(d, {})
+            for emp in result.employees:
+                day_map.setdefault(emp.key, OFF)
+            if d >= split:
+                continue
+            legacy_day = legacy.schedule.get(d, {})
+            for emp in result.employees:
+                day_map[emp.key] = legacy_day.get(emp.key, OFF)
+
+    def is_locked_split_cell(self, result: ScheduleResult, d: date) -> bool:
+        split = self.enabled_split_date()
+        return bool(split and self.is_team_source(result.source_name) and d < split)
+
+    def storage_source_name(self, result: ScheduleResult) -> str:
+        if result.source_name:
+            if self.is_team_source(result.source_name) and not self.month_has_team_dates(result.year, result.month):
+                return self.legacy_source_name(result.year, result.month)
+            return result.source_name
+        return self.source_name_for_view(result.year, result.month)
+
+    def result_for_storage(self, result: ScheduleResult, source_name: str) -> ScheduleResult:
+        stored = self.clone_schedule_result(result, source_name)
+        split = self.enabled_split_date()
+        if split and self.is_team_source(source_name):
+            for d in month_dates(stored.year, stored.month):
+                if d >= split:
+                    continue
+                day_map = stored.schedule.setdefault(d, {})
+                for emp in stored.employees:
+                    day_map[emp.key] = OFF
+        return stored
+
+    def save_result_to_db(self, result: ScheduleResult) -> int:
+        source_name = self.storage_source_name(result)
+        stored = self.result_for_storage(result, source_name)
+        schedule_id = save_schedule(stored, source_name)
+        save_unavailable_days(stored.employees, source_name)
+        result.source_name = source_name
+        self.update_next_month_gy_carryover(stored)
+        return schedule_id
+
+    def load_selected_month_from_db(self, refresh_overview: bool = True) -> None:
+        if self._suppress_month_reload:
+            return
+        year = self.year_spin.value()
+        month = self.month_spin.value()
+        self.result = self.load_schedule_for_view(year, month)
+        self.apply_previous_month_gy_carryover(self.result)
+        self.apply_split_legacy_prefix(self.result)
+        self.employees = list(self.result.employees)
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
-        self.render_year_overview()
+        self.refresh_validation_and_stats()
+        self.update_schedule_source_status()
+        if refresh_overview:
+            self.schedule_year_overview_refresh()
+
+    def on_team_split_controls_changed(self) -> None:
+        if self._loading_split_controls:
+            return
+        self.save_team_split_settings()
+        self.update_schedule_source_status()
+        self.load_selected_month_from_db(refresh_overview=False)
+        self.render_cumulative_stats()
+        self.schedule_year_overview_refresh()
 
     def _build_rule_widgets(self) -> None:
         def spin(value: int, minimum: int = 0, maximum: int = 31) -> QSpinBox:
@@ -410,6 +661,12 @@ class MainWindow(QMainWindow):
         top.addWidget(self.year_spin)
         top.addWidget(QLabel("월"))
         top.addWidget(self.month_spin)
+        top.addWidget(self.split_enabled_check)
+        top.addWidget(QLabel("기준일"))
+        top.addWidget(self.split_date_edit)
+        top.addWidget(QLabel("보기"))
+        top.addWidget(self.schedule_view_combo)
+        top.addWidget(self.schedule_source_label)
         generate_btn = QPushButton("자동 생성")
         generate_btn.clicked.connect(self.generate_schedule)
         validate_btn = QPushButton("검증/통계 갱신")
@@ -701,10 +958,12 @@ class MainWindow(QMainWindow):
             if not self.result_has_work_marks(pasted) and self.apply_unavailable_map_to_current_month(year, month, unavailable_map):
                 return
 
-        self.year_spin.setValue(year)
-        self.month_spin.setValue(month)
+        self.set_current_month(year, month)
+        pasted.source_name = self.source_name_for_view(year, month)
+        self.apply_split_legacy_prefix(pasted)
         self.result = pasted
         self.apply_previous_month_gy_carryover(self.result)
+        self.apply_split_legacy_prefix(self.result)
         self.employees = list(pasted.employees)
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
@@ -746,7 +1005,11 @@ class MainWindow(QMainWindow):
         month: int,
         unavailable_map: Dict[str, set[date]],
     ) -> bool:
-        target = self.result if self.result and self.result.year == year and self.result.month == month else load_schedule_result(year, month)
+        source_name = self.source_name_for_view(year, month)
+        if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == source_name:
+            target = self.result
+        else:
+            target = self.load_schedule_for_view(year, month)
         if not target:
             return False
         updated = self.merge_unavailable_into_employees(target.employees, unavailable_map)
@@ -758,14 +1021,12 @@ class MainWindow(QMainWindow):
             return False
         target.employees = updated
         self.result = target
-        self.year_spin.setValue(year)
-        self.month_spin.setValue(month)
+        self.set_current_month(year, month)
         self.employees = list(updated)
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
-        source_name = f"{year}-{month:02d}"
-        save_unavailable_days(self.employees, source_name)
+        save_unavailable_days(self.employees, self.storage_source_name(target))
         QMessageBox.information(self, "불가일 반영", f"{year}년 {month}월 회색 셀 불가일 {hit}건을 반영했습니다.")
         return True
 
@@ -773,10 +1034,12 @@ class MainWindow(QMainWindow):
         self.paste_schedule_from_clipboard_for_month(self.year_spin.value(), self.month_spin.value())
 
     def apply_imported_schedule(self, result: ScheduleResult, source_label: str) -> None:
-        self.year_spin.setValue(result.year)
-        self.month_spin.setValue(result.month)
+        self.set_current_month(result.year, result.month)
+        result.source_name = self.source_name_for_view(result.year, result.month)
+        self.apply_split_legacy_prefix(result)
         self.result = result
         self.apply_previous_month_gy_carryover(self.result)
+        self.apply_split_legacy_prefix(self.result)
         self.employees = list(result.employees)
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
@@ -827,6 +1090,7 @@ class MainWindow(QMainWindow):
             return
         start_row = max(0, table.currentRow())
         start_col = max(2, table.currentColumn())
+        dates = month_dates(result.year, result.month)
         table.blockSignals(True)
         for r_offset, values in enumerate(matrix):
             row = start_row + r_offset
@@ -835,6 +1099,9 @@ class MainWindow(QMainWindow):
             for c_offset, raw in enumerate(values):
                 col = start_col + c_offset
                 if col < 2 or col >= table.columnCount():
+                    continue
+                day_index = col - 2
+                if day_index < 0 or day_index >= len(dates) or self.is_locked_split_cell(result, dates[day_index]):
                     continue
                 shift = normalize_shift_code(raw)
                 item = table.item(row, col)
@@ -878,6 +1145,8 @@ class MainWindow(QMainWindow):
                 continue
             emp = result.employees[row]
             d = dates[day_index]
+            if self.is_locked_split_cell(result, d):
+                continue
             result.schedule.setdefault(d, {})[emp.key] = OFF
             item = table.item(row, col)
             if item is None:
@@ -897,14 +1166,14 @@ class MainWindow(QMainWindow):
         self.schedule_year_overview_refresh()
 
     def save_result_silently(self, result: ScheduleResult) -> None:
-        save_schedule(result, f"{result.year}-{result.month:02d}")
-        save_unavailable_days(result.employees, f"{result.year}-{result.month:02d}")
-        self.update_next_month_gy_carryover(result)
+        self.save_result_to_db(result)
 
     def update_next_month_gy_carryover(self, result: ScheduleResult) -> None:
         next_year = result.year if result.month < 12 else result.year + 1
         next_month = result.month + 1 if result.month < 12 else 1
-        next_result = load_schedule_result(next_year, next_month)
+        source_name = self.storage_source_name(result)
+        next_source = source_name if self.is_team_source(source_name) and self.month_has_team_dates(next_year, next_month) else self.legacy_source_name(next_year, next_month)
+        next_result = self.load_existing_schedule_for_source(next_year, next_month, next_source)
         if not next_result:
             return
         before = {
@@ -917,7 +1186,8 @@ class MainWindow(QMainWindow):
             for d in month_dates(next_year, next_month)[:6]
         }
         if before != after:
-            save_schedule(next_result, f"{next_year}-{next_month:02d}")
+            stored = self.result_for_storage(next_result, self.storage_source_name(next_result))
+            save_schedule(stored, stored.source_name)
 
     def copy_schedule_selection_to_clipboard(self) -> None:
         self.copy_table_selection_to_clipboard(self.schedule_table, skip_columns=2)
@@ -956,6 +1226,7 @@ class MainWindow(QMainWindow):
             return
         start_row = max(0, self.schedule_table.currentRow())
         start_col = max(2, self.schedule_table.currentColumn())
+        dates = month_dates(self.result.year, self.result.month)
         self._updating_table = True
         for r_offset, values in enumerate(matrix):
             row = start_row + r_offset
@@ -970,6 +1241,9 @@ class MainWindow(QMainWindow):
                     shift = normalize_shift_code(raw)
                 col = start_col + c_offset
                 if col < 2 or col >= self.schedule_table.columnCount():
+                    continue
+                day_index = col - 2
+                if day_index < 0 or day_index >= len(dates) or self.is_locked_split_cell(self.result, dates[day_index]):
                     continue
                 item = self.schedule_table.item(row, col)
                 if item is None:
@@ -1032,6 +1306,8 @@ class MainWindow(QMainWindow):
             self.add_employee_rows(employees)
             self.paste_box.clear()
             return
+        self.result.source_name = self.source_name_for_view(self.result.year, self.result.month)
+        self.apply_split_legacy_prefix(self.result)
         self.employees = self.result.employees
         self.add_employee_rows(self.employees)
         self.render_schedule_table()
@@ -1044,11 +1320,8 @@ class MainWindow(QMainWindow):
             return
         self.sync_schedule_from_table()
         self.refresh_validation_and_stats()
-        source_name = f"{self.result.year}-{self.result.month:02d}"
         try:
-            schedule_id = save_schedule(self.result, source_name)
-            save_unavailable_days(self.result.employees, source_name)
-            self.update_next_month_gy_carryover(self.result)
+            schedule_id = self.save_result_to_db(self.result)
         except Exception as exc:
             QMessageBox.critical(self, "DB 저장 실패", str(exc))
             return
@@ -1094,11 +1367,14 @@ class MainWindow(QMainWindow):
                 previous_day_duty_employee_keys=self.previous_month_last_duty_keys(
                     self.year_spin.value(),
                     self.month_spin.value(),
+                    self.source_name_for_view(self.year_spin.value(), self.month_spin.value()),
                 ),
             )
         except ScheduleError as exc:
             QMessageBox.warning(self, "생성 실패", str(exc))
             return
+        self.result.source_name = self.source_name_for_view(self.result.year, self.result.month)
+        self.apply_split_legacy_prefix(self.result)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
         self.schedule_year_overview_refresh()
@@ -1165,6 +1441,8 @@ class MainWindow(QMainWindow):
                     item.setBackground(FAMILY_HEADER_COLOR)
                 elif is_holiday_or_weekend(d, result.holidays):
                     item.setBackground(HOLIDAY_HEADER_COLOR)
+                if self.is_locked_split_cell(result, d):
+                    item.setToolTip("분할 기준일 전 기존 근무표입니다.")
             self.apply_staffing_header_style(table, result, col, d)
         if not result.employees:
             hint = QTableWidgetItem("여기에 클릭 후 Ctrl+V")
@@ -1187,7 +1465,13 @@ class MainWindow(QMainWindow):
                     cell = QTableWidgetItem(shift)
                     cell.setTextAlignment(Qt.AlignCenter)
                     cell.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
-                    cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+                    if self.is_locked_split_cell(result, d):
+                        cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                        cell.setToolTip("분할 기준일 전 기존 근무표입니다.")
+                        if shift == OFF:
+                            cell.setBackground(LOCKED_SPLIT_COLOR)
+                    else:
+                        cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                     table.setItem(row, col, cell)
         table.cellChanged.connect(lambda row, col, t=table: self.on_month_table_cell_changed(t, row, col))
         self.configure_roster_table_layout(table, len(dates), row_count, overview=True)
@@ -1203,20 +1487,21 @@ class MainWindow(QMainWindow):
             year_title.setStyleSheet("font-size: 20px; font-weight: 800; margin-top: 20px;")
             self.year_scroll_layout.addWidget(year_title)
             for month in range(1, 13):
-                loaded = load_schedule_result(year, month)
-                if self.result and self.result.year == year and self.result.month == month:
+                source_name = self.source_name_for_view(year, month)
+                loaded = self.load_existing_schedule_for_source(year, month, source_name)
+                if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == source_name:
                     result = self.result
                     status = "현재 편집 중"
                 elif loaded:
                     result = loaded
+                    if self.is_team_source(source_name):
+                        self.apply_split_legacy_prefix(result)
                     status = "DB 저장됨"
                 else:
-                    employees = []
-                    schedule = {d: {} for d in month_dates(year, month)}
-                    result = ScheduleResult(year, month, employees, schedule, korean_holidays(year))
-                    status = "미저장"
+                    result = self.load_schedule_for_view(year, month)
+                    status = "기존 복사본" if result.employees and self.is_team_source(source_name) else "미저장"
                 title_row = QHBoxLayout()
-                title = QLabel(f"{year}년 {month}월 · {status}")
+                title = QLabel(f"{year}년 {month}월 · {self.source_label_for_view(year, month)} · {status}")
                 title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
                 clear_btn = QPushButton("이 달 초기화")
                 clear_btn.setFixedWidth(95)
@@ -1241,31 +1526,27 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, refresh)
 
     def clear_month_schedule(self, year: int, month: int) -> None:
+        source_name = self.source_name_for_view(year, month)
+        source_label = self.source_label_for_view(year, month)
         answer = QMessageBox.question(
             self,
             "월 근무표 초기화",
-            f"{year}년 {month}월 저장 근무표와 불가일을 삭제할까요?",
+            f"{year}년 {month}월 {source_label} 저장 근무표와 불가일을 삭제할까요?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
             return
-        deleted = delete_month_schedule(year, month)
+        deleted = delete_month_schedule(year, month, source_name)
         if self.result and self.result.year == year and self.result.month == month:
-            self.result = ScheduleResult(
-                year,
-                month,
-                [],
-                {d: {} for d in month_dates(year, month)},
-                korean_holidays(year),
-            )
-            self.employees = []
-            self.add_employee_rows([])
+            self.result = self.load_schedule_for_view(year, month)
+            self.employees = list(self.result.employees)
+            self.add_employee_rows(self.result.employees)
             self.render_schedule_table()
             self.refresh_validation_and_stats()
         self.render_cumulative_stats()
         self.schedule_year_overview_refresh()
-        QMessageBox.information(self, "초기화 완료", f"{year}년 {month}월 근무표를 초기화했습니다. 삭제된 저장본: {deleted}개")
+        QMessageBox.information(self, "초기화 완료", f"{year}년 {month}월 {source_label} 근무표를 초기화했습니다. 삭제된 저장본: {deleted}개")
 
     def render_schedule_table(self) -> None:
         if not self.result:
@@ -1278,13 +1559,11 @@ class MainWindow(QMainWindow):
         headers = ["성명", "사번"] + [f"{weekday_ko(d)}\n{d.day}" for d in dates]
         self.schedule_table.setHorizontalHeaderLabels(headers)
         self.schedule_table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
-        try:
-            self.schedule_table.horizontalHeader().customContextMenuRequested.disconnect()
-        except Exception:
-            pass
-        self.schedule_table.horizontalHeader().customContextMenuRequested.connect(
-            lambda pos: self.show_date_header_menu(self.schedule_table, pos)
-        )
+        if not self._schedule_header_menu_connected:
+            self.schedule_table.horizontalHeader().customContextMenuRequested.connect(
+                lambda pos: self.show_date_header_menu(self.schedule_table, pos)
+            )
+            self._schedule_header_menu_connected = True
         for col, d in enumerate(dates, start=2):
             item = self.schedule_table.horizontalHeaderItem(col)
             if item:
@@ -1292,6 +1571,8 @@ class MainWindow(QMainWindow):
                     item.setBackground(FAMILY_HEADER_COLOR)
                 elif is_holiday_or_weekend(d, self.result.holidays):
                     item.setBackground(HOLIDAY_HEADER_COLOR)
+                if self.is_locked_split_cell(self.result, d):
+                    item.setToolTip("분할 기준일 전 기존 근무표입니다.")
             self.apply_staffing_header_style(self.schedule_table, self.result, col, d)
         for row, emp in enumerate(self.result.employees):
             name_item = QTableWidgetItem(emp.name)
@@ -1306,7 +1587,13 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
                 item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+                if self.is_locked_split_cell(self.result, d):
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    item.setToolTip("분할 기준일 전 기존 근무표입니다.")
+                    if shift == OFF:
+                        item.setBackground(LOCKED_SPLIT_COLOR)
+                else:
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                 self.schedule_table.setItem(row, col, item)
         self.schedule_table.verticalHeader().setVisible(False)
         self.configure_roster_table_layout(self.schedule_table, len(dates), len(self.result.employees), overview=False)
@@ -1315,6 +1602,11 @@ class MainWindow(QMainWindow):
 
     def on_schedule_cell_changed(self, row: int, col: int) -> None:
         if self._updating_table or col < 2 or not self.result:
+            return
+        dates = month_dates(self.result.year, self.result.month)
+        day_index = col - 2
+        if day_index < 0 or day_index >= len(dates) or self.is_locked_split_cell(self.result, dates[day_index]):
+            self.render_schedule_table()
             return
         item = self.schedule_table.item(row, col)
         if not item:
@@ -1333,6 +1625,18 @@ class MainWindow(QMainWindow):
             return
         result = getattr(table, "result", None)
         if not isinstance(result, ScheduleResult):
+            return
+        dates = month_dates(result.year, result.month)
+        day_index = col - 2
+        if day_index < 0 or day_index >= len(dates) or self.is_locked_split_cell(result, dates[day_index]):
+            item = table.item(row, col)
+            if item and 0 <= row < len(result.employees):
+                emp = result.employees[row]
+                shift = result.schedule.get(dates[day_index], {}).get(emp.key, OFF)
+                table.blockSignals(True)
+                item.setText("" if shift == OFF else shift)
+                item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                table.blockSignals(False)
             return
         item = table.item(row, col)
         if not item:
@@ -1358,21 +1662,28 @@ class MainWindow(QMainWindow):
         dates = month_dates(result.year, result.month)
         for row, emp in enumerate(result.employees):
             for col, d in enumerate(dates, start=2):
+                if self.is_locked_split_cell(result, d):
+                    continue
                 item = table.item(row, col)
                 result.schedule[d][emp.key] = self.normalize_shift(item.text() if item else "")
         carryover_counts = self.previous_month_gy_carryover_counts(result)
         for emp in result.employees:
             count = min(carryover_counts.get(emp.key, 0), len(dates))
             for day_index in range(count):
+                if self.is_locked_split_cell(result, dates[day_index]):
+                    continue
                 result.schedule[dates[day_index]][emp.key] = OFF
         expand_gy_blocks(result.employees, result.year, result.month, result.schedule)
         self.apply_previous_month_gy_carryover(result, carryover_counts)
         self.enforce_duty_day_without_gy(result)
+        self.apply_split_legacy_prefix(result)
 
     def previous_month_gy_carryover_counts(self, result: ScheduleResult) -> Dict[str, int]:
         prev_year = result.year if result.month > 1 else result.year - 1
         prev_month = result.month - 1 if result.month > 1 else 12
-        previous = load_schedule_result(prev_year, prev_month)
+        source_name = self.storage_source_name(result)
+        prev_source = source_name if self.is_team_source(source_name) and self.month_has_team_dates(prev_year, prev_month) else self.legacy_source_name(prev_year, prev_month)
+        previous = self.load_existing_schedule_for_source(prev_year, prev_month, prev_source)
         if not previous:
             return {}
         current_dates = month_dates(result.year, result.month)
@@ -1420,15 +1731,19 @@ class MainWindow(QMainWindow):
             count = min(counts.get(emp.key, 0), len(current_dates))
             for day_index in range(count):
                 d = current_dates[day_index]
+                if self.is_locked_split_cell(result, d):
+                    continue
                 if not is_duty_day(d):
                     result.schedule[d][emp.key] = SHIFT_GY
         self.enforce_month_start_after_previous_duty(result)
         self.enforce_duty_day_without_gy(result)
 
-    def previous_month_last_duty_keys(self, year: int, month: int) -> set[str]:
+    def previous_month_last_duty_keys(self, year: int, month: int, source_name: Optional[str] = None) -> set[str]:
         prev_year = year if month > 1 else year - 1
         prev_month = month - 1 if month > 1 else 12
-        previous = load_schedule_result(prev_year, prev_month)
+        current_source = source_name or self.source_name_for_view(year, month)
+        prev_source = current_source if self.is_team_source(current_source) and self.month_has_team_dates(prev_year, prev_month) else self.legacy_source_name(prev_year, prev_month)
+        previous = self.load_existing_schedule_for_source(prev_year, prev_month, prev_source)
         if not previous:
             return set()
         previous_last = month_dates(prev_year, prev_month)[-1]
@@ -1445,13 +1760,15 @@ class MainWindow(QMainWindow):
         if not current_dates:
             return
         first_day = current_dates[0]
-        blocked_keys = self.previous_month_last_duty_keys(result.year, result.month)
+        blocked_keys = self.previous_month_last_duty_keys(result.year, result.month, self.storage_source_name(result))
         if not blocked_keys:
             return
         for emp in result.employees:
             if emp.key not in blocked_keys:
                 continue
             for d in current_dates:
+                if self.is_locked_split_cell(result, d):
+                    continue
                 if is_duty_day(d):
                     break
                 if result.schedule.get(d, {}).get(emp.key, OFF) != SHIFT_GY:
@@ -1591,7 +1908,7 @@ class MainWindow(QMainWindow):
                 self.cumulative_stats_table.setItem(r, c, QTableWidgetItem(str(row.get(key, ""))))
 
     def render_period_shift_stats(self, start_year: int, start_month: int, end_year: int, end_month: int) -> None:
-        rows = period_assignment_rows(start_year, start_month, end_year, end_month)
+        rows = self.filter_period_rows_for_split(period_assignment_rows(start_year, start_month, end_year, end_month))
         period_end = month_dates(end_year, end_month)[-1]
         work_shifts = {SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY}
         by_emp: Dict[tuple[str, str], Dict[str, object]] = {}
@@ -1743,6 +2060,24 @@ class MainWindow(QMainWindow):
                         item.setBackground(self._relative_gradient_color(current, values_for_color))
                 self.cumulative_stats_table.setItem(r, c, item)
 
+    def filter_period_rows_for_split(self, rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        split = self.enabled_split_date()
+        filtered: List[Dict[str, object]] = []
+        for row in rows:
+            source_name = str(row.get("source_name") or "")
+            is_team = self.is_team_source(source_name)
+            if not split:
+                if not is_team:
+                    filtered.append(row)
+                continue
+            work_date = date.fromisoformat(str(row.get("work_date")))
+            if work_date < split:
+                if not is_team:
+                    filtered.append(row)
+            elif is_team:
+                filtered.append(row)
+        return filtered
+
     def show_stats_table_menu(self, pos) -> None:
         mode = self.stats_mode_combo.currentText()
         if mode == "저장 월":
@@ -1855,7 +2190,10 @@ class MainWindow(QMainWindow):
                 if not item:
                     continue
                 shift = self.normalize_shift(item.text())
-                item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
+                if self.is_locked_split_cell(self.result, d) and shift == OFF:
+                    item.setBackground(LOCKED_SPLIT_COLOR)
+                else:
+                    item.setBackground(SHIFT_COLORS.get(shift, QColor("#ffffff")))
                 if shift not in (OFF, SHIFT_GY_REST) and d in emp.unavailable_dates:
                     item.setBackground(WARNING_COLOR)
 

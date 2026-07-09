@@ -81,6 +81,7 @@ def upsert_employee(conn: sqlite3.Connection, emp: Employee) -> int:
 def save_schedule(result: ScheduleResult, source_name: str = "") -> int:
     with connect() as conn:
         imported_at = datetime.now().isoformat(timespec="seconds")
+        result.source_name = source_name
         conn.execute(
             """
             INSERT INTO monthly_schedules(year, month, source_name, imported_at)
@@ -110,23 +111,39 @@ def save_schedule(result: ScheduleResult, source_name: str = "") -> int:
         return schedule_id
 
 
-def delete_month_schedule(year: int, month: int) -> int:
-    """Delete saved schedules and unavailable marks for a month."""
+def delete_month_schedule(year: int, month: int, source_name: Optional[str] = None) -> int:
+    """Delete saved schedules and unavailable marks for a month/source."""
     start_date = month_dates(year, month)[0].isoformat()
     end_date = month_dates(year, month)[-1].isoformat()
     with connect() as conn:
-        schedule_rows = conn.execute(
-            "SELECT id FROM monthly_schedules WHERE year=? AND month=?",
-            (year, month),
-        ).fetchall()
+        if source_name is None:
+            schedule_rows = conn.execute(
+                "SELECT id FROM monthly_schedules WHERE year=? AND month=?",
+                (year, month),
+            ).fetchall()
+        else:
+            schedule_rows = conn.execute(
+                "SELECT id FROM monthly_schedules WHERE year=? AND month=? AND source_name=?",
+                (year, month, source_name),
+            ).fetchall()
         schedule_ids = [int(row["id"]) for row in schedule_rows]
         for schedule_id in schedule_ids:
             conn.execute("DELETE FROM assignments WHERE schedule_id=?", (schedule_id,))
-        conn.execute("DELETE FROM monthly_schedules WHERE year=? AND month=?", (year, month))
-        conn.execute(
-            "DELETE FROM unavailable_days WHERE work_date BETWEEN ? AND ?",
-            (start_date, end_date),
-        )
+        if source_name is None:
+            conn.execute("DELETE FROM monthly_schedules WHERE year=? AND month=?", (year, month))
+            conn.execute(
+                "DELETE FROM unavailable_days WHERE work_date BETWEEN ? AND ?",
+                (start_date, end_date),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM monthly_schedules WHERE year=? AND month=? AND source_name=?",
+                (year, month, source_name),
+            )
+            conn.execute(
+                "DELETE FROM unavailable_days WHERE work_date BETWEEN ? AND ? AND source_name=?",
+                (start_date, end_date, source_name),
+            )
         return len(schedule_ids)
 
 
@@ -229,7 +246,7 @@ def period_assignment_rows(start_year: int, start_month: int, end_year: int, end
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT e.name, e.employee_no, a.work_date, a.shift_code
+            SELECT e.name, e.employee_no, a.work_date, a.shift_code, ms.source_name
             FROM assignments a
             JOIN employees e ON e.id = a.employee_id
             JOIN monthly_schedules ms ON ms.id = a.schedule_id
@@ -241,21 +258,50 @@ def period_assignment_rows(start_year: int, start_month: int, end_year: int, end
         return [dict(row) for row in rows]
 
 
-def load_schedule_result(year: int, month: int) -> Optional[ScheduleResult]:
+def load_schedule_result(
+    year: int,
+    month: int,
+    source_name: Optional[str] = None,
+    fallback_source_names: Optional[Iterable[str]] = None,
+) -> Optional[ScheduleResult]:
     """Load the latest saved schedule for a year/month from the local DB."""
     from .calendar_utils import korean_holidays
 
     with connect() as conn:
-        sched = conn.execute(
-            """
-            SELECT id, source_name
-            FROM monthly_schedules
-            WHERE year=? AND month=?
-            ORDER BY imported_at DESC, id DESC
-            LIMIT 1
-            """,
-            (year, month),
-        ).fetchone()
+        sched = None
+        source_candidates: List[Optional[str]]
+        if source_name is not None:
+            source_candidates = [source_name]
+            if fallback_source_names:
+                source_candidates.extend(fallback_source_names)
+        else:
+            source_candidates = []
+
+        for candidate in source_candidates:
+            sched = conn.execute(
+                """
+                SELECT id, source_name
+                FROM monthly_schedules
+                WHERE year=? AND month=? AND source_name=?
+                ORDER BY imported_at DESC, id DESC
+                LIMIT 1
+                """,
+                (year, month, candidate or ""),
+            ).fetchone()
+            if sched:
+                break
+
+        if sched is None and source_name is None:
+            sched = conn.execute(
+                """
+                SELECT id, source_name
+                FROM monthly_schedules
+                WHERE year=? AND month=?
+                ORDER BY imported_at DESC, id DESC
+                LIMIT 1
+                """,
+                (year, month),
+            ).fetchone()
         if not sched:
             return None
         rows = conn.execute(
@@ -308,4 +354,4 @@ def load_schedule_result(year: int, month: int) -> Optional[ScheduleResult]:
             emp_key = f"{row['name']}|{row['employee_no'] or ''}"
             if d in schedule:
                 schedule[d][emp_key] = str(row["shift_code"] or OFF)
-        return ScheduleResult(year, month, employees, schedule, korean_holidays(year))
+        return ScheduleResult(year, month, employees, schedule, korean_holidays(year), source_name=str(sched["source_name"] or ""))
