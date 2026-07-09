@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import re
 from collections import Counter
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from .calendar_settings import add_custom_family_day, add_custom_holiday, remove_family_day, remove_holiday
 from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
-from .database import delete_month_schedule, load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
+from .database import DB_PATH, delete_month_schedule, export_database, load_schedule_result, period_assignment_rows, replace_database_from_file, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, gray_cell_offsets_from_html_rows, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_html_table, parse_schedule_from_clipboard, parse_schedule_from_html_rows, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard, parse_unavailable_from_html_rows, parse_unavailable_from_html_rows_by_position
 from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .module_settings import load_modules, save_modules
@@ -984,11 +984,17 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
         save_db_action = QAction("현재 근무표 DB 저장", self)
         save_db_action.triggered.connect(self.save_current_schedule_to_db)
+        export_db_action = QAction("DB 내보내기", self)
+        export_db_action.triggered.connect(self.export_database_file)
+        import_db_action = QAction("DB 불러오기", self)
+        import_db_action.triggered.connect(self.import_database_file)
         export_action = QAction("엑셀 저장", self)
         export_action.triggered.connect(self.export_excel)
         toolbar.addAction(save_db_action)
+        toolbar.addAction(export_db_action)
+        toolbar.addAction(import_db_action)
         toolbar.addAction(export_action)
-        self.admin_only_actions.extend([save_db_action, export_action])
+        self.admin_only_actions.extend([save_db_action, export_db_action, import_db_action, export_action])
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -2362,6 +2368,59 @@ class MainWindow(QMainWindow):
         self.mark_cumulative_stats_dirty()
         self.mark_year_overview_dirty()
         QMessageBox.information(self, "DB 저장 완료", f"근무표를 DB에 저장했습니다. ID: {schedule_id}")
+
+    def export_database_file(self) -> None:
+        default_name = f"gmp_scheduler_{datetime.now():%Y%m%d_%H%M%S}.sqlite3"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "DB 내보내기",
+            str(Path.cwd() / default_name),
+            "SQLite DB (*.sqlite3 *.db);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            exported_path = export_database(Path(path))
+        except Exception as exc:
+            QMessageBox.critical(self, "DB 내보내기 실패", str(exc))
+            return
+        QMessageBox.information(self, "DB 내보내기 완료", f"DB를 저장했습니다.\n{exported_path}")
+
+    def import_database_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "DB 파일 선택",
+            str(Path.cwd()),
+            "SQLite DB (*.sqlite3 *.db);;All Files (*)",
+        )
+        if not path:
+            return
+        source_path = Path(path)
+        try:
+            if source_path.resolve() == DB_PATH.resolve():
+                QMessageBox.information(self, "DB 불러오기", "현재 사용 중인 DB 파일입니다.")
+                return
+        except OSError:
+            pass
+        answer = QMessageBox.question(
+            self,
+            "DB 불러오기",
+            "선택한 DB로 현재 DB를 교체합니다.\n현재 DB는 자동 백업한 뒤 진행합니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            backup_path = replace_database_from_file(source_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "DB 불러오기 실패", str(exc))
+            return
+        self.load_selected_month_from_db(refresh_overview=True)
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
+        backup_line = f"\n기존 DB 백업: {backup_path}" if backup_path else ""
+        QMessageBox.information(self, "DB 불러오기 완료", f"DB를 불러왔습니다.{backup_line}")
 
     def export_excel(self) -> None:
         if not self.require_admin("엑셀 저장"):

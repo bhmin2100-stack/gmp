@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import shutil
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_S
 from .stats import EmployeeStats, compute_stats
 
 DB_PATH = Path("gmp_scheduler.sqlite3")
+REQUIRED_TABLES = {"employees", "monthly_schedules", "assignments"}
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -63,13 +65,69 @@ CREATE TABLE IF NOT EXISTS unavailable_days (
 """
 
 
-def connect(path: Path = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, factory=ClosingConnection)
+def connect(path: Optional[Path] = None) -> sqlite3.Connection:
+    conn = sqlite3.connect(path or DB_PATH, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
     ensure_schema(conn)
     return conn
+
+
+def validate_database_file(path: Path) -> None:
+    db_path = Path(path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"DB 파일을 찾을 수 없습니다: {db_path}")
+    try:
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, factory=ClosingConnection) as conn:
+            rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    except sqlite3.Error as exc:
+        raise ValueError(f"SQLite DB 파일을 열 수 없습니다: {exc}") from exc
+    table_names = {str(row[0]) for row in rows}
+    missing = REQUIRED_TABLES - table_names
+    if missing:
+        raise ValueError(f"GMP 근무표 DB 파일이 아닙니다. 누락 테이블: {', '.join(sorted(missing))}")
+
+
+def export_database(target_path: Path) -> Path:
+    target = Path(target_path)
+    if target.suffix == "":
+        target = target.with_suffix(".sqlite3")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with connect():
+        pass
+    try:
+        if target.resolve() == DB_PATH.resolve():
+            return target
+    except OSError:
+        pass
+    shutil.copy2(DB_PATH, target)
+    return target
+
+
+def backup_database() -> Optional[Path]:
+    if not DB_PATH.exists():
+        return None
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = DB_PATH.with_name(f"{DB_PATH.stem}_backup_{timestamp}{DB_PATH.suffix}")
+    counter = 1
+    while backup_path.exists():
+        backup_path = DB_PATH.with_name(f"{DB_PATH.stem}_backup_{timestamp}_{counter}{DB_PATH.suffix}")
+        counter += 1
+    shutil.copy2(DB_PATH, backup_path)
+    return backup_path
+
+
+def replace_database_from_file(source_path: Path) -> Optional[Path]:
+    source = Path(source_path)
+    validate_database_file(source)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_database()
+    shutil.copy2(source, DB_PATH)
+    with connect():
+        pass
+    return backup_path
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
