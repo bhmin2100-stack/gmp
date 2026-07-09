@@ -50,6 +50,7 @@ from .database import delete_month_schedule, load_schedule_result, period_assign
 from .excel_io import export_schedule_to_excel, gray_cell_offsets_from_html_rows, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_html_table, parse_schedule_from_clipboard, parse_schedule_from_html_rows, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard, parse_unavailable_from_html_rows, parse_unavailable_from_html_rows_by_position
 from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
 from .module_settings import load_modules, save_modules
+from .rule_settings import load_team_rules, save_team_rules
 from .rule_utils import min_rules_for_date, rule_value_for_display, set_rule_value_from_display
 from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
@@ -244,7 +245,9 @@ class MainWindow(QMainWindow):
 
         self.employees: List[Employee] = []
         self.result: Optional[ScheduleResult] = None
-        self.rules = ShiftRules()
+        self.team_rules = load_team_rules()
+        self.rule_settings_source = VIEW_V11
+        self.rules = self.team_rules[self.rule_settings_source]
         self.module_names = load_modules()
         self.is_admin = False
         self.admin_only_widgets: List[QWidget] = []
@@ -895,6 +898,47 @@ class MainWindow(QMainWindow):
         self.max_consecutive_spin = spin(self.rules.max_consecutive_work_days, 1)
         self.max_consecutive_gy_spin = spin(self.rules.max_consecutive_gy, 1)
 
+    def active_rule_settings_source(self) -> str:
+        if hasattr(self, "rule_source_combo"):
+            value = self.rule_source_combo.currentData()
+            if value in TEAM_VIEWS:
+                return str(value)
+        return self.rule_settings_source
+
+    def rules_for_source(self, source_name: str) -> ShiftRules:
+        if source_name in TEAM_VIEWS:
+            return self.team_rules[source_name]
+        return self.team_rules[VIEW_V11]
+
+    def current_result_rules(self, result: Optional[ScheduleResult] = None) -> ShiftRules:
+        target = result or self.result
+        if isinstance(target, ScheduleResult):
+            source_name = self.storage_source_name(target)
+        else:
+            source_name = self.current_roster_source_name() if hasattr(self, "year_spin") else VIEW_V11
+        return self.rules_for_source(source_name)
+
+    def populate_rule_widgets(self, source_name: str) -> None:
+        rules = self.rules_for_source(source_name)
+        self.rules = rules
+        for (day_type, shift), widget in self.day_type_rule_spins.items():
+            widget.blockSignals(True)
+            widget.setValue(rule_value_for_display(rules, day_type, shift))
+            widget.blockSignals(False)
+        for widget, value in (
+            (self.max_consecutive_spin, rules.max_consecutive_work_days),
+            (self.max_consecutive_gy_spin, rules.max_consecutive_gy),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+
+    def on_rule_source_changed(self) -> None:
+        self.sync_rules_from_widgets(source_name=self.rule_settings_source, widget_source=self.rule_settings_source, save=False)
+        self.rule_settings_source = self.active_rule_settings_source()
+        self.populate_rule_widgets(self.rule_settings_source)
+        self.refresh_validation_and_stats()
+
     def selected_calendar_date(self) -> date:
         qdate = self.calendar_date_edit.date()
         return date(qdate.year(), qdate.month(), qdate.day())
@@ -1068,6 +1112,16 @@ class MainWindow(QMainWindow):
         settings_layout = QHBoxLayout(settings_tab)
         staffing_group = QGroupBox("날짜 유형별 최소 인원")
         staffing_layout = QVBoxLayout(staffing_group)
+        rule_source_row = QHBoxLayout()
+        rule_source_row.addWidget(QLabel("설정 대상"))
+        self.rule_source_combo = QComboBox()
+        for team in TEAM_VIEWS:
+            self.rule_source_combo.addItem(team, team)
+        self.rule_source_combo.setCurrentIndex(0)
+        self.rule_source_combo.currentIndexChanged.connect(lambda _index: self.on_rule_source_changed())
+        rule_source_row.addWidget(self.rule_source_combo)
+        rule_source_row.addStretch(1)
+        staffing_layout.addLayout(rule_source_row)
         self.day_type_rule_table = QTableWidget(len(DAY_TYPE_ORDER), 4)
         self.day_type_rule_table.setHorizontalHeaderLabels(["구분", "Day", "SW", "GY"])
         self.day_type_rule_table.verticalHeader().setVisible(False)
@@ -1140,21 +1194,36 @@ class MainWindow(QMainWindow):
         self.refresh_unavailable_employee_combo()
         self.apply_access_mode()
 
-    def sync_rules_from_widgets(self) -> None:
+    def sync_rules_from_widgets(
+        self,
+        source_name: Optional[str] = None,
+        *,
+        widget_source: Optional[str] = None,
+        save: bool = True,
+    ) -> ShiftRules:
+        active_source = self.active_rule_settings_source()
+        update_source = widget_source or active_source
+        target_source = source_name or update_source
+        rules = self.rules_for_source(update_source)
         for (day_type, shift), widget in self.day_type_rule_spins.items():
-            set_rule_value_from_display(self.rules, day_type, shift, widget.value())
-        self.rules.min_weekday = {
+            set_rule_value_from_display(rules, day_type, shift, widget.value())
+        rules.min_weekday = {
             SHIFT_DAY: self.day_type_rule_spins[(DAY_TYPE_ORDER[0], SHIFT_DAY)].value(),
             SHIFT_SWING: self.day_type_rule_spins[(DAY_TYPE_ORDER[0], SHIFT_SWING)].value(),
             SHIFT_GY: self.day_type_rule_spins[(DAY_TYPE_ORDER[0], SHIFT_GY)].value(),
         }
-        self.rules.min_holiday = {
+        rules.min_holiday = {
             SHIFT_DAY: self.day_type_rule_spins[(DAY_TYPE_ORDER[3], SHIFT_DAY)].value(),
             SHIFT_SWING: self.day_type_rule_spins[(DAY_TYPE_ORDER[3], SHIFT_SWING)].value(),
             SHIFT_DUTY: self.day_type_rule_spins[(DAY_TYPE_ORDER[3], SHIFT_GY)].value(),
         }
-        self.rules.max_consecutive_work_days = self.max_consecutive_spin.value()
-        self.rules.max_consecutive_gy = self.max_consecutive_gy_spin.value()
+        rules.max_consecutive_work_days = self.max_consecutive_spin.value()
+        rules.max_consecutive_gy = self.max_consecutive_gy_spin.value()
+        if update_source == self.rule_settings_source:
+            self.rules = rules
+        if save:
+            save_team_rules(self.team_rules)
+        return self.rules_for_source(target_source)
 
     def collect_employees(self) -> List[Employee]:
         employees: List[Employee] = []
@@ -1303,7 +1372,8 @@ class MainWindow(QMainWindow):
         if not text.strip() and not html.strip():
             QMessageBox.warning(self, "붙여넣기 실패", "클립보드가 비어 있습니다. 엑셀에서 표 범위를 먼저 복사하세요.")
             return
-        self.sync_rules_from_widgets()
+        target_source = source_name or self.current_roster_source_name()
+        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
         unavailable_map: Dict[str, set[date]] = {}
         html_rows = parse_html_table(html) if html.strip() else []
         if html_rows:
@@ -1313,9 +1383,9 @@ class MainWindow(QMainWindow):
                 unavailable_map = {}
         try:
             if html_rows:
-                pasted = parse_schedule_from_html_rows(html_rows, year, month, self.rules)
+                pasted = parse_schedule_from_html_rows(html_rows, year, month, rules)
             else:
-                pasted = parse_schedule_from_clipboard(text, html, year, month, self.rules)
+                pasted = parse_schedule_from_clipboard(text, html, year, month, rules)
         except Exception as exc:
             if unavailable_map and self.apply_unavailable_map_to_current_month(year, month, unavailable_map, source_name):
                 return
@@ -1415,11 +1485,12 @@ class MainWindow(QMainWindow):
                 ]
         return []
 
-    def generation_rules_message(self) -> str:
-        self.sync_rules_from_widgets()
+    def generation_rules_message(self, source_name: Optional[str] = None) -> str:
+        target_source = source_name or self.current_roster_source_name()
+        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
         rule_lines = []
         for day_type in DAY_TYPE_ORDER:
-            day_rules = self.rules.min_by_day_type.get(day_type, {})
+            day_rules = rules.min_by_day_type.get(day_type, {})
             gy_shift = SHIFT_DUTY if day_type == DAY_TYPE_ORDER[3] else SHIFT_GY
             gy_label = "당직" if day_type == DAY_TYPE_ORDER[3] else "GY"
             rule_lines.append(
@@ -1427,21 +1498,21 @@ class MainWindow(QMainWindow):
                 f"SW {day_rules.get(SHIFT_SWING, 0)}명, {gy_label} {day_rules.get(gy_shift, 0)}명"
             )
         return (
-            "아래 규칙으로 현재 월/페이지 근무표를 자동 생성합니다.\n\n"
+            f"아래 규칙으로 {target_source} 근무표를 자동 생성합니다.\n\n"
             f"{chr(10).join(rule_lines)}\n"
-            f"- 최대 연속 근무: {self.rules.max_consecutive_work_days}일\n"
-            f"- 최대 연속 G/당직: {self.rules.max_consecutive_gy}일\n"
+            f"- 최대 연속 근무: {rules.max_consecutive_work_days}일\n"
+            f"- 최대 연속 G/당직: {rules.max_consecutive_gy}일\n"
             "- 직원별 불가일은 근무 배정에서 제외합니다.\n"
-            f"- 직원별 근무 가능일을 기준으로 주 {self.rules.min_weekly_work_days}회 이상 배정을 우선합니다.\n"
+            f"- 직원별 근무 가능일을 기준으로 주 {rules.min_weekly_work_days}회 이상 배정을 우선합니다.\n"
             "- 전월 말 당직 이월 규칙을 반영합니다.\n\n"
             "확인을 누르면 바로 생성하고 DB에 자동 저장합니다."
         )
 
-    def confirm_generation_rules(self) -> bool:
+    def confirm_generation_rules(self, source_name: Optional[str] = None) -> bool:
         answer = QMessageBox.question(
             self,
             "근무표 생성 규칙",
-            self.generation_rules_message(),
+            self.generation_rules_message(source_name),
             QMessageBox.Ok | QMessageBox.Cancel,
             QMessageBox.Ok,
         )
@@ -1620,9 +1691,10 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        self.sync_rules_from_widgets()
+        target_source = self.current_roster_source_name()
+        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
         try:
-            imported = import_schedule_from_excel(path, self.year_spin.value(), self.month_spin.value(), self.rules)
+            imported = import_schedule_from_excel(path, self.year_spin.value(), self.month_spin.value(), rules)
         except Exception as exc:
             QMessageBox.warning(self, "엑셀 불러오기 실패", str(exc))
             return
@@ -2074,9 +2146,10 @@ class MainWindow(QMainWindow):
         if not text.strip():
             QMessageBox.warning(self, "붙여넣기 실패", "붙여넣은 표가 비어 있습니다.")
             return
-        self.sync_rules_from_widgets()
+        target_source = self.current_roster_source_name()
+        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
         try:
-            self.result = parse_schedule_from_tsv(text, self.year_spin.value(), self.month_spin.value(), self.rules)
+            self.result = parse_schedule_from_tsv(text, self.year_spin.value(), self.month_spin.value(), rules)
         except Exception as exc:
             # Fallback: old employee-list-only paste format.
             employees = parse_employees_from_tsv(text)
@@ -2143,12 +2216,12 @@ class MainWindow(QMainWindow):
     ) -> None:
         if hasattr(self, "require_admin") and not self.require_admin("근무표 자동 생성"):
             return
-        if confirm_rules and not self.confirm_generation_rules():
-            return
-        self.sync_rules_from_widgets()
         year = self.year_spin.value()
         month = self.month_spin.value()
         target_source = source_name or self.current_roster_source_name()
+        if confirm_rules and not self.confirm_generation_rules(target_source):
+            return
+        rules = self.sync_rules_from_widgets(source_name=target_source if target_source in TEAM_VIEWS else None)
         self.employees = self.collect_employees()
         if not self.employees and self.result:
             self.employees = list(self.result.employees)
@@ -2164,7 +2237,7 @@ class MainWindow(QMainWindow):
                 self.employees,
                 year,
                 month,
-                self.rules,
+                rules,
                 previous_day_duty_employee_keys=self.previous_month_last_duty_keys(
                     year,
                     month,
@@ -2749,7 +2822,7 @@ class MainWindow(QMainWindow):
             shift for shift in result.schedule.get(d, {}).values()
             if shift and shift not in (OFF, SHIFT_GY_REST)
         )
-        min_rules = min_rules_for_date(self.rules, d, result.holidays)
+        min_rules = min_rules_for_date(self.current_result_rules(result), d, result.holidays)
         is_duty = is_duty_day(d)
         required = [SHIFT_DAY, SHIFT_SWING, SHIFT_DUTY if is_duty else SHIFT_GY]
 
@@ -2782,13 +2855,14 @@ class MainWindow(QMainWindow):
         self.sync_rules_from_widgets()
         if not self.result:
             return
+        rules = self.current_result_rules(self.result)
         self.result.warnings = validate_schedule(
             self.result.employees,
             self.result.year,
             self.result.month,
             self.result.schedule,
             self.result.holidays,
-            self.rules,
+            rules,
         )
         self.render_stats()
         self.render_warnings()
