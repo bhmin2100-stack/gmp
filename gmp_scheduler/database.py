@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS employees (
     name TEXT NOT NULL,
     employee_no TEXT NOT NULL DEFAULT '',
     is_new INTEGER NOT NULL DEFAULT 0,
+    module TEXT NOT NULL DEFAULT '',
     UNIQUE(name, employee_no)
 );
 
@@ -59,17 +60,26 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    ensure_schema(conn)
     return conn
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    employee_columns = {row["name"] for row in conn.execute("PRAGMA table_info(employees)").fetchall()}
+    if "module" not in employee_columns:
+        conn.execute("ALTER TABLE employees ADD COLUMN module TEXT NOT NULL DEFAULT ''")
 
 
 def upsert_employee(conn: sqlite3.Connection, emp: Employee) -> int:
     conn.execute(
         """
-        INSERT INTO employees(name, employee_no, is_new)
-        VALUES (?, ?, ?)
-        ON CONFLICT(name, employee_no) DO UPDATE SET is_new=excluded.is_new
+        INSERT INTO employees(name, employee_no, is_new, module)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(name, employee_no) DO UPDATE SET
+            is_new=excluded.is_new,
+            module=excluded.module
         """,
-        (emp.name, emp.employee_id, 1 if emp.is_new else 0),
+        (emp.name, emp.employee_id, 1 if emp.is_new else 0, emp.module),
     )
     row = conn.execute(
         "SELECT id FROM employees WHERE name=? AND employee_no=?",
@@ -306,7 +316,7 @@ def load_schedule_result(
             return None
         rows = conn.execute(
             """
-            SELECT e.id AS employee_db_id, e.name, e.employee_no, e.is_new, a.work_date, a.shift_code
+            SELECT e.id AS employee_db_id, e.name, e.employee_no, e.is_new, e.module, a.work_date, a.shift_code
             FROM assignments a
             JOIN employees e ON e.id = a.employee_id
             WHERE a.schedule_id=?
@@ -318,13 +328,13 @@ def load_schedule_result(
             return None
 
         employee_ids_by_key: Dict[str, int] = {}
-        employee_meta_by_key: Dict[str, tuple[str, str, bool]] = {}
+        employee_meta_by_key: Dict[str, tuple[str, str, bool, str]] = {}
         for row in rows:
             name = str(row["name"])
             employee_no = str(row["employee_no"] or "")
             key = f"{name}|{employee_no}"
             employee_ids_by_key[key] = int(row["employee_db_id"])
-            employee_meta_by_key[key] = (name, employee_no, bool(row["is_new"]))
+            employee_meta_by_key[key] = (name, employee_no, bool(row["is_new"]), str(row["module"] or ""))
         unavailable_by_key: Dict[str, Set[date]] = {key: set() for key in employee_meta_by_key}
         if employee_ids_by_key:
             placeholders = ",".join("?" for _ in employee_ids_by_key)
@@ -345,8 +355,8 @@ def load_schedule_result(
                 if key:
                     unavailable_by_key.setdefault(key, set()).add(date.fromisoformat(str(unavailable_row["work_date"])))
         employees = [
-            Employee(name, employee_no, is_new, unavailable_by_key.get(key, set()))
-            for key, (name, employee_no, is_new) in employee_meta_by_key.items()
+            Employee(name, employee_no, is_new, unavailable_by_key.get(key, set()), module)
+            for key, (name, employee_no, is_new, module) in employee_meta_by_key.items()
         ]
         schedule: ScheduleMap = {d: {emp.key: OFF for emp in employees} for d in month_dates(year, month)}
         for row in rows:

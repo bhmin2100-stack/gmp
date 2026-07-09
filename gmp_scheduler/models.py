@@ -42,6 +42,7 @@ class Employee:
     employee_id: str = ""
     is_new: bool = False
     unavailable_dates: Set[date] = field(default_factory=set)
+    module: str = ""
 
     @property
     def key(self) -> str:

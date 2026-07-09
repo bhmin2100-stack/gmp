@@ -15,6 +15,7 @@ dist/
 *.spec
 *.xlsx
 !examples/*.xlsx
+module_settings.json
 
 # OS / IDE
 .DS_Store

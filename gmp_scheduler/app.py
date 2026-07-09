@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -43,6 +45,7 @@ from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_
 from .database import delete_month_schedule, load_schedule_result, period_assignment_rows, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_html_table, parse_schedule_from_clipboard, parse_schedule_from_html_rows, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard, parse_unavailable_from_html_rows
 from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleResult, ShiftRules
+from .module_settings import load_modules, save_modules
 from .rule_utils import min_rules_for_date, rule_value_for_display, set_rule_value_from_display
 from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
@@ -237,6 +240,7 @@ class MainWindow(QMainWindow):
         self.employees: List[Employee] = []
         self.result: Optional[ScheduleResult] = None
         self.rules = ShiftRules()
+        self.module_names = load_modules()
         self._updating_table = False
         self._year_overview_refresh_pending = False
         self._year_overview_dirty = True
@@ -259,9 +263,11 @@ class MainWindow(QMainWindow):
 
         self._build_rule_widgets()
 
-        self.employee_table = ScheduleInputTable(self, 0, 4)
-        self.employee_table.setHorizontalHeaderLabels(["성명", "사번", "신규", "불가일(YYYY-MM-DD, ...)"])
+        self.employee_table = ScheduleInputTable(self, 0, 5)
+        self.employee_table.setHorizontalHeaderLabels(['성명', '사번', '신규', '불가일(YYYY-MM-DD, ...)', '모듈'])
         self.employee_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.employee_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.employee_table.customContextMenuRequested.connect(self.show_employee_module_menu)
 
         self.paste_box = QTextEdit()
         self.paste_box.setPlaceholderText("보조 입력칸입니다. 엑셀에서 표 범위 복사 → [엑셀 근무표 붙여넣기] 또는 표에서 Ctrl+V. 근무 코드와 회색 불가일을 함께 인식합니다.")
@@ -384,6 +390,88 @@ class MainWindow(QMainWindow):
         else:
             self.schedule_source_label.setText(f"보기/저장: {label} · V11/V12는 {self.split_date():%Y-%m}부터")
 
+
+    def refresh_module_list(self) -> None:
+        if not hasattr(self, "module_list_widget"):
+            return
+        self.module_list_widget.clear()
+        for name in self.module_names:
+            self.module_list_widget.addItem(name)
+
+    def add_module_from_input(self) -> None:
+        if not hasattr(self, "module_name_edit"):
+            return
+        name = self.module_name_edit.text().strip()
+        if not name:
+            return
+        if name not in self.module_names:
+            self.module_names.append(name)
+            save_modules(self.module_names)
+            self.refresh_module_list()
+        self.module_name_edit.clear()
+
+    def remove_selected_module(self) -> None:
+        if not hasattr(self, "module_list_widget"):
+            return
+        row = self.module_list_widget.currentRow()
+        if row < 0 or row >= len(self.module_names):
+            return
+        name = self.module_names.pop(row)
+        save_modules(self.module_names)
+        self.refresh_module_list()
+        self.clear_module_from_employees(name)
+
+    def selected_employee_rows(self, fallback_row: int = -1) -> List[int]:
+        rows = sorted({index.row() for index in self.employee_table.selectedIndexes() if index.row() >= 0})
+        if not rows and fallback_row >= 0:
+            rows = [fallback_row]
+        return rows
+
+    def show_employee_module_menu(self, pos) -> None:
+        row = self.employee_table.rowAt(pos.y())
+        rows = self.selected_employee_rows(row)
+        if not rows:
+            return
+        menu = QMenu(self)
+        for module_name in self.module_names:
+            menu.addAction(module_name).triggered.connect(
+                lambda _checked=False, r=rows, m=module_name: self.apply_module_to_employee_rows(r, m)
+            )
+        if self.module_names:
+            menu.addSeparator()
+        menu.addAction("모듈 없음").triggered.connect(
+            lambda _checked=False, r=rows: self.apply_module_to_employee_rows(r, "")
+        )
+        menu.exec(self.employee_table.viewport().mapToGlobal(pos))
+
+    def apply_module_to_employee_rows(self, rows: List[int], module_name: str) -> None:
+        for row in rows:
+            if row < 0 or row >= self.employee_table.rowCount():
+                continue
+            self.employee_table.setItem(row, 4, QTableWidgetItem(module_name))
+        self.employees = self.collect_employees()
+        if self.result:
+            module_by_key = {emp.key: emp.module for emp in self.employees}
+            self.result.employees = [
+                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_by_key.get(emp.key, emp.module))
+                for emp in self.result.employees
+            ]
+            try:
+                self.save_result_silently(self.result)
+            except Exception as exc:
+                self.statusBar().showMessage(f"모듈은 표에 반영됐지만 DB 저장에 실패했습니다: {exc}", 6000)
+                return
+        self.statusBar().showMessage(f"{len(rows)}명 모듈 설정 완료", 4000)
+
+    def clear_module_from_employees(self, module_name: str) -> None:
+        changed = False
+        for row in range(self.employee_table.rowCount()):
+            if self._cell_text(self.employee_table, row, 4) == module_name:
+                self.employee_table.setItem(row, 4, QTableWidgetItem(""))
+                changed = True
+        if changed:
+            self.employees = self.collect_employees()
+
     def set_current_month(self, year: int, month: int) -> None:
         self._suppress_month_reload = True
         try:
@@ -456,7 +544,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def clone_schedule_result(result: ScheduleResult, source_name: Optional[str] = None) -> ScheduleResult:
         employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates))
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module)
             for emp in result.employees
         ]
         schedule = {
@@ -517,7 +605,7 @@ class MainWindow(QMainWindow):
         employee_by_key = {emp.key: emp for emp in result.employees}
         for emp in legacy.employees:
             if emp.key not in employee_by_key:
-                copied = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates))
+                copied = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module)
                 result.employees.append(copied)
                 employee_by_key[copied.key] = copied
 
@@ -791,8 +879,27 @@ class MainWindow(QMainWindow):
         rule_form.addRow("최대 연속 근무", self.max_consecutive_spin)
         rule_form.addRow("최대 연속 GY", self.max_consecutive_gy_spin)
 
+
+        module_group = QGroupBox("모듈")
+        module_layout = QVBoxLayout(module_group)
+        self.module_list_widget = QListWidget()
+        self.module_name_edit = QLineEdit()
+        self.module_name_edit.setPlaceholderText("모듈 이름")
+        module_button_row = QHBoxLayout()
+        add_module_btn = QPushButton("추가")
+        remove_module_btn = QPushButton("삭제")
+        add_module_btn.clicked.connect(self.add_module_from_input)
+        remove_module_btn.clicked.connect(self.remove_selected_module)
+        module_button_row.addWidget(add_module_btn)
+        module_button_row.addWidget(remove_module_btn)
+        module_layout.addWidget(self.module_list_widget)
+        module_layout.addWidget(self.module_name_edit)
+        module_layout.addLayout(module_button_row)
+        self.refresh_module_list()
+
         settings_layout.addWidget(staffing_group, 2)
         settings_layout.addWidget(rule_group)
+        settings_layout.addWidget(module_group)
         settings_layout.addStretch(1)
         self.settings_tab_index = tabs.addTab(settings_tab, "근무 설정")
 
@@ -818,6 +925,7 @@ class MainWindow(QMainWindow):
             self.employee_table.setItem(row, 2, QTableWidgetItem("Y" if emp.is_new else ""))
             unavailable = ", ".join(sorted(d.isoformat() for d in emp.unavailable_dates))
             self.employee_table.setItem(row, 3, QTableWidgetItem(unavailable))
+            self.employee_table.setItem(row, 4, QTableWidgetItem(emp.module))
 
     def sync_rules_from_widgets(self) -> None:
         for (day_type, shift), widget in self.day_type_rule_spins.items():
@@ -849,7 +957,8 @@ class MainWindow(QMainWindow):
             is_new_text = self._cell_text(self.employee_table, row, 2).lower()
             is_new = is_new_text in ("y", "yes", "true", "1", "신규", "ㅇ", "o")
             unavailable = parse_unavailable(self._cell_text(self.employee_table, row, 3), year, month)
-            emp = Employee(name=name, employee_id=employee_id, is_new=is_new, unavailable_dates=unavailable)
+            module = self._cell_text(self.employee_table, row, 4)
+            emp = Employee(name=name, employee_id=employee_id, is_new=is_new, unavailable_dates=unavailable, module=module)
             if emp.key in seen:
                 continue
             seen.add(emp.key)
@@ -1077,7 +1186,7 @@ class MainWindow(QMainWindow):
             previous = self.load_existing_schedule_for_source(seed_year, seed_month, seed_source)
             if previous and previous.employees:
                 return [
-                    Employee(emp.name, emp.employee_id, emp.is_new, set())
+                    Employee(emp.name, emp.employee_id, emp.is_new, set(), emp.module)
                     for emp in previous.employees
                 ]
         return []
@@ -1146,7 +1255,7 @@ class MainWindow(QMainWindow):
         for emp in employees:
             dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
             if dates:
-                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates)))
+                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module))
             else:
                 updated.append(emp)
         return updated
@@ -1576,7 +1685,7 @@ class MainWindow(QMainWindow):
             dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
             if dates:
                 hit += len(dates)
-                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates)))
+                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module))
             else:
                 updated.append(emp)
         self.employees = updated
