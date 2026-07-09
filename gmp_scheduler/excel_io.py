@@ -397,8 +397,7 @@ def parse_unavailable_from_html_rows(rows: List[List[dict]], year: int, month: i
         employee_no = str(row[id_col].get("text", "")).strip() if id_col < len(row) else ""
         dates: Set[date] = set()
         for day, col in day_cols.items():
-            text = str(row[col].get("text", "")).strip() if col < len(row) else ""
-            if col < len(row) and not text and is_gray_rgb(_cell_color_from_html_cell(row[col])):
+            if col < len(row) and is_gray_rgb(_cell_color_from_html_cell(row[col])):
                 dates.add(valid_dates[day])
         if dates:
             key = f"{name}|{employee_no}"
@@ -615,9 +614,7 @@ def import_unavailable_from_gray_excel(path: str | Path, year: int, month: int) 
         employee_no = str(row[id_col].value).strip() if id_col < len(row) and row[id_col].value is not None else ""
         dates: Set[date] = set()
         for day, col in day_cols.items():
-            cell_value = row[col].value if col < len(row) else None
-            text = "" if cell_value is None else str(cell_value).strip()
-            if col < len(row) and not text and is_gray_fill(row[col]):
+            if col < len(row) and is_gray_fill(row[col]):
                 dates.add(valid_dates[day])
         if dates:
             key = f"{name}|{employee_no}"

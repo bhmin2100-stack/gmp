@@ -263,7 +263,7 @@ class MainWindow(QMainWindow):
         self.employee_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         self.paste_box = QTextEdit()
-        self.paste_box.setPlaceholderText("보조 입력칸입니다. 권장 방식: 엑셀에서 표 범위 복사 → 위쪽 [엑셀 근무표 붙여넣기] 또는 [회색 불가일 붙여넣기] 버튼 클릭")
+        self.paste_box.setPlaceholderText("보조 입력칸입니다. 엑셀에서 표 범위 복사 → [엑셀 근무표 붙여넣기] 또는 표에서 Ctrl+V. 근무 코드와 회색 불가일을 함께 인식합니다.")
         self.paste_box.setMaximumHeight(100)
 
         self.schedule_table = CurrentMonthRosterTable(self, 0, 0)
@@ -1433,7 +1433,7 @@ class MainWindow(QMainWindow):
     def paste_unavailable_from_clipboard(self) -> None:
         text, html = self._clipboard_text_html()
         if not html.strip():
-            QMessageBox.warning(self, "붙여넣기 실패", "회색 셀은 텍스트 붙여넣기로 인식할 수 없습니다. 엑셀에서 표 범위를 복사한 뒤 이 버튼을 누르세요.")
+            QMessageBox.warning(self, "붙여넣기 실패", "회색 셀은 텍스트만으로 인식할 수 없습니다. 엑셀에서 표 범위를 복사한 뒤 근무표에 붙여넣으세요.")
             return
         self.employees = self.collect_employees()
         if not self.employees and self.result:
