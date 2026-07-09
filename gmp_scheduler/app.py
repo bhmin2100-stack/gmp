@@ -423,12 +423,16 @@ class MainWindow(QMainWindow):
             return False
         year = self.year_spin.value()
         month = self.month_spin.value()
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == getattr(self, "year_tab_index", -1):
+            next_year, next_month = self.shift_month_values(year, month, delta)
+            return self.show_roster_page(next_year, next_month, 0)
         page_count = self.roster_page_count(year, month)
         page_index = self.month_split_page_index if page_count > 1 else 0
         target_index = page_index + delta
         if 0 <= target_index < page_count:
             self.month_split_page_index = target_index
             self.render_schedule_table()
+            self.mark_year_overview_dirty()
             return True
 
         month_delta = 1 if delta > 0 else -1
@@ -716,14 +720,14 @@ class MainWindow(QMainWindow):
 
         year_tab = QWidget()
         year_layout = QVBoxLayout(year_tab)
-        year_layout.addWidget(QLabel("2025년 1월부터 현재/선택 연도까지의 근무표입니다. 각 월 표를 클릭하고 Ctrl+V 하면 그 월에 엑셀 근무표가 바로 붙습니다. 날짜 헤더 우클릭으로 휴일/페밀리데이를 편집합니다."))
+        year_layout.addWidget(QLabel("선택한 연도/월의 근무표입니다. PageUp/PageDown, 좌우 화살표, 또는 상단 연도/월 변경으로 다른 월을 봅니다. 표를 클릭하고 Ctrl+V 하면 해당 월에 엑셀 근무표가 바로 붙습니다."))
         self.year_scroll = QScrollArea()
         self.year_scroll.setWidgetResizable(True)
         self.year_scroll_content = QWidget()
         self.year_scroll_layout = QVBoxLayout(self.year_scroll_content)
         self.year_scroll.setWidget(self.year_scroll_content)
         year_layout.addWidget(self.year_scroll)
-        self.year_tab_index = tabs.addTab(year_tab, "연간 보기")
+        self.year_tab_index = tabs.addTab(year_tab, "근무표 보기")
 
         self.schedule_tab_index = -1
         self.schedule_tab_container = QWidget()
@@ -1687,6 +1691,7 @@ class MainWindow(QMainWindow):
             widget = item.widget()
             child_layout = item.layout()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
             elif child_layout is not None:
                 self._clear_layout(child_layout)  # type: ignore[arg-type]
@@ -1786,65 +1791,70 @@ class MainWindow(QMainWindow):
             return
         self._year_overview_dirty = False
         self._clear_layout(self.year_scroll_layout)
-        end_year = max(date.today().year, self.year_spin.value(), OVERVIEW_START_YEAR)
-        for year in range(OVERVIEW_START_YEAR, end_year + 1):
-            year_title = QLabel(f"{year}년")
-            year_title.setStyleSheet("font-size: 20px; font-weight: 800; margin-top: 20px;")
-            self.year_scroll_layout.addWidget(year_title)
-            for month in range(1, 13):
-                if self.month_has_team_dates(year, month):
-                    title = QLabel(f"{year}년 {month}월 · V11/V12")
-                    title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
-                    self.year_scroll_layout.addWidget(title)
-                    for team in TEAM_VIEWS:
-                        source_name = self.source_name_for_view(year, month, team)
-                        loaded = self.load_existing_schedule_for_source(year, month, source_name)
-                        if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == source_name:
-                            result = self.result
-                            status = "현재 편집 중"
-                        elif loaded:
-                            result = loaded
-                            status = "DB 저장됨"
-                        else:
-                            result = self.load_schedule_for_view(year, month, team)
-                            status = "기존 복사본" if result.employees else "미작성"
-                        self.apply_split_legacy_prefix(result)
-                        team_row = QHBoxLayout()
-                        team_title = QLabel(f"{team} · {status}")
-                        team_title.setStyleSheet("font-size: 13px; font-weight: 700; margin-top: 4px;")
-                        team_row.addWidget(team_title)
-                        team_row.addStretch(1)
-                        if self.should_offer_schedule_generation(result, source_name):
-                            team_row.addWidget(self.make_schedule_generate_button(year, month, source_name))
-                        self.year_scroll_layout.addLayout(team_row)
-                        self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
-                    continue
-                source_name = self.source_name_for_view(year, month)
-                loaded = self.load_existing_schedule_for_source(year, month, source_name)
-                if self.result and self.result.year == year and self.result.month == month and self.storage_source_name(self.result) == source_name:
-                    result = self.result
-                    status = "현재 편집 중"
-                elif loaded:
-                    result = loaded
-                    if self.is_team_source(source_name):
-                        self.apply_split_legacy_prefix(result)
-                    status = "DB 저장됨"
-                else:
-                    result = self.load_schedule_for_view(year, month)
-                    status = "기존 복사본" if result.employees and self.is_team_source(source_name) else "미저장"
-                title_row = QHBoxLayout()
-                title = QLabel(f"{year}년 {month}월 · {self.source_label_for_view(year, month)} · {status}")
-                title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
+        year = self.year_spin.value()
+        month = self.month_spin.value()
+        self.clamp_month_split_page(year, month)
+
+        nav_row = QHBoxLayout()
+        prev_btn = QPushButton("◀ 이전 달")
+        next_btn = QPushButton("다음 달 ▶")
+        prev_btn.setFixedWidth(105)
+        next_btn.setFixedWidth(105)
+        prev_btn.clicked.connect(lambda _checked=False: self.move_roster_page(-1))
+        next_btn.clicked.connect(lambda _checked=False: self.move_roster_page(1))
+        page_label = QLabel(f"{year}년 {month}월")
+        page_label.setStyleSheet("font-size: 20px; font-weight: 800; margin: 10px 0;")
+        nav_row.addWidget(prev_btn)
+        nav_row.addWidget(page_label)
+        nav_row.addStretch(1)
+        nav_row.addWidget(next_btn)
+        self.year_scroll_layout.addLayout(nav_row)
+
+        def resolve_result(source_name: str, view: Optional[str] = None) -> tuple[ScheduleResult, str]:
+            loaded = self.load_existing_schedule_for_source(year, month, source_name)
+            if (
+                self.result
+                and self.result.year == year
+                and self.result.month == month
+                and self.storage_source_name(self.result) == source_name
+            ):
+                result = self.result
+                status = "현재 편집 중"
+            elif loaded:
+                result = loaded
+                status = "DB 저장됨"
+            else:
+                result = self.load_schedule_for_view(year, month, view)
+                status = "기존 복사본" if result.employees and self.is_team_source(source_name) else "미작성"
+            if self.is_team_source(source_name):
+                self.apply_split_legacy_prefix(result)
+            return result, status
+
+        def add_roster_section(title_text: str, result: ScheduleResult, status: str, source_name: str, clearable: bool) -> None:
+            title_row = QHBoxLayout()
+            title = QLabel(f"{title_text} · {status}")
+            title.setStyleSheet("font-size: 16px; font-weight: 700; margin-top: 14px;")
+            title_row.addWidget(title)
+            title_row.addStretch(1)
+            if self.should_offer_schedule_generation(result, source_name):
+                title_row.addWidget(self.make_schedule_generate_button(year, month, source_name))
+            if clearable:
                 clear_btn = QPushButton("이 달 초기화")
                 clear_btn.setFixedWidth(95)
                 clear_btn.clicked.connect(lambda _checked=False, y=year, m=month: self.clear_month_schedule(y, m))
-                title_row.addWidget(title)
-                title_row.addStretch(1)
-                if self.should_offer_schedule_generation(result, source_name):
-                    title_row.addWidget(self.make_schedule_generate_button(year, month, source_name))
                 title_row.addWidget(clear_btn)
-                self.year_scroll_layout.addLayout(title_row)
-                self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
+            self.year_scroll_layout.addLayout(title_row)
+            self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
+
+        if self.month_has_team_dates(year, month):
+            for team in TEAM_VIEWS:
+                source_name = self.source_name_for_view(year, month, team)
+                result, status = resolve_result(source_name, team)
+                add_roster_section(self.source_label_for_view(year, month, team), result, status, source_name, False)
+        else:
+            source_name = self.source_name_for_view(year, month)
+            result, status = resolve_result(source_name)
+            add_roster_section(self.source_label_for_view(year, month), result, status, source_name, True)
         self.year_scroll_layout.addStretch(1)
 
     def schedule_year_overview_refresh(self) -> None:
