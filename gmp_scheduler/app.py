@@ -242,6 +242,8 @@ class MainWindow(QMainWindow):
         self._cumulative_stats_dirty = True
         self._suppress_month_reload = False
         self._schedule_header_menu_connected = False
+        self.month_split_page_index = 0
+        self._preserve_roster_page_on_load = False
 
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2100)
@@ -277,6 +279,8 @@ class MainWindow(QMainWindow):
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
         self.month_split_scroll = QScrollArea()
         self.month_split_scroll.setWidgetResizable(True)
+        self.month_split_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.month_split_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.month_split_content = QWidget()
         self.month_split_layout = QVBoxLayout(self.month_split_content)
         self.month_split_scroll.setWidget(self.month_split_content)
@@ -378,6 +382,52 @@ class MainWindow(QMainWindow):
             self.month_spin.setValue(month)
         finally:
             self._suppress_month_reload = False
+
+    def roster_page_count(self, year: int, month: int) -> int:
+        return len(TEAM_VIEWS) if self.month_has_team_dates(year, month) else 1
+
+    def clamp_month_split_page(self, year: int, month: int) -> None:
+        self.month_split_page_index = min(
+            max(0, self.month_split_page_index),
+            self.roster_page_count(year, month) - 1,
+        )
+
+    def shift_month_values(self, year: int, month: int, delta: int) -> tuple[int, int]:
+        total = year * 12 + (month - 1) + delta
+        return total // 12, total % 12 + 1
+
+    def show_roster_page(self, year: int, month: int, page_index: int) -> bool:
+        if year < self.year_spin.minimum() or year > self.year_spin.maximum():
+            return False
+        if month < self.month_spin.minimum() or month > self.month_spin.maximum():
+            return False
+        self.month_split_page_index = min(max(0, page_index), self.roster_page_count(year, month) - 1)
+        self.set_current_month(year, month)
+        self._preserve_roster_page_on_load = True
+        try:
+            self.on_selected_month_changed()
+        finally:
+            self._preserve_roster_page_on_load = False
+        return True
+
+    def move_roster_page(self, delta: int) -> bool:
+        if delta == 0:
+            return False
+        year = self.year_spin.value()
+        month = self.month_spin.value()
+        page_count = self.roster_page_count(year, month)
+        page_index = self.month_split_page_index if page_count > 1 else 0
+        target_index = page_index + delta
+        if 0 <= target_index < page_count:
+            self.month_split_page_index = target_index
+            self.render_schedule_table()
+            return True
+
+        month_delta = 1 if delta > 0 else -1
+        next_year, next_month = self.shift_month_values(year, month, month_delta)
+        next_count = self.roster_page_count(next_year, next_month)
+        next_index = 0 if delta > 0 else next_count - 1
+        return self.show_roster_page(next_year, next_month, next_index)
 
     def empty_schedule_result(self, year: int, month: int, source_name: Optional[str] = None) -> ScheduleResult:
         employees: List[Employee] = []
@@ -519,6 +569,8 @@ class MainWindow(QMainWindow):
     def on_selected_month_changed(self) -> None:
         if self._suppress_month_reload:
             return
+        if not self._preserve_roster_page_on_load:
+            self.month_split_page_index = 0
         if hasattr(self, "tabs") and self.tabs.currentIndex() != getattr(self, "schedule_tab_index", -1):
             self.tabs.setCurrentIndex(self.schedule_tab_index)
         self.load_selected_month_from_db()
@@ -835,6 +887,10 @@ class MainWindow(QMainWindow):
         return None
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_PageUp, Qt.Key_PageDown):
+            delta = -1 if event.key() == Qt.Key_PageUp else 1
+            if self.move_roster_page(delta):
+                return True
         if event.type() == QEvent.KeyPress and event.matches(QKeySequence.Copy):
             table = self._focus_ancestor(CurrentMonthRosterTable)
             if table is not None:
@@ -1582,20 +1638,30 @@ class MainWindow(QMainWindow):
 
     def render_split_month_tables(self, year: int, month: int) -> None:
         self._clear_layout(self.month_split_layout)
-        for team in TEAM_VIEWS:
-            result = self.result if (
-                self.result
-                and self.result.year == year
-                and self.result.month == month
-                and self.storage_source_name(self.result) == team
-            ) else self.load_schedule_for_view(year, month, team)
-            self.apply_previous_month_gy_carryover(result)
-            self.apply_split_legacy_prefix(result)
+        self.clamp_month_split_page(year, month)
+        team = TEAM_VIEWS[self.month_split_page_index]
+        result = self.result if (
+            self.result
+            and self.result.year == year
+            and self.result.month == month
+            and self.storage_source_name(self.result) == team
+        ) else self.load_schedule_for_view(year, month, team)
+        self.apply_previous_month_gy_carryover(result)
+        self.apply_split_legacy_prefix(result)
 
-            title = QLabel(team)
-            title.setStyleSheet("font-size: 16px; font-weight: 800; margin-top: 10px;")
-            self.month_split_layout.addWidget(title)
-            self.month_split_layout.addWidget(self._make_schedule_view_table(result))
+        nav = QHBoxLayout()
+        prev_btn = QPushButton("Prev Page")
+        next_btn = QPushButton("Next Page")
+        page_label = QLabel(f"{year}-{month:02d} / {team} / {self.month_split_page_index + 1}/{len(TEAM_VIEWS)}")
+        page_label.setStyleSheet("font-size: 16px; font-weight: 800; margin-top: 10px;")
+        prev_btn.clicked.connect(lambda _checked=False: self.move_roster_page(-1))
+        next_btn.clicked.connect(lambda _checked=False: self.move_roster_page(1))
+        nav.addWidget(prev_btn)
+        nav.addWidget(page_label)
+        nav.addStretch(1)
+        nav.addWidget(next_btn)
+        self.month_split_layout.addLayout(nav)
+        self.month_split_layout.addWidget(self._make_schedule_view_table(result))
         self.month_split_layout.addStretch(1)
 
     def render_schedule_table(self) -> None:
