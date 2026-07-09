@@ -74,12 +74,12 @@ HOLIDAY_HEADER_COLOR = QColor("#fce4d6")
 FAMILY_HEADER_COLOR = QColor("#d9ead3")
 STAFFING_OK_COLOR = QColor("#008000")
 OVERVIEW_START_YEAR = 2025
-NAME_COL_WIDTH = 74
-ID_COL_WIDTH = 58
-DAY_COL_WIDTH = 34
-COMPACT_ROW_HEIGHT = 20
+NAME_COL_WIDTH = 70
+ID_COL_WIDTH = 54
+DAY_COL_WIDTH = 32
+COMPACT_ROW_HEIGHT = 18
 COMPACT_FONT_SIZE = 8
-HEADER_FONT_SIZE = 10
+HEADER_FONT_SIZE = 9
 VIEW_LEGACY = "legacy"
 VIEW_V11 = "V11"
 VIEW_V12 = "V12"
@@ -2420,7 +2420,7 @@ class MainWindow(QMainWindow):
         header_font = header.font()
         header_font.setPointSize(HEADER_FONT_SIZE)
         header.setFont(header_font)
-        header.setFixedHeight(36)
+        header.setFixedHeight(34)
 
         table.setColumnWidth(0, NAME_COL_WIDTH)
         table.setColumnWidth(1, ID_COL_WIDTH)
@@ -2431,7 +2431,7 @@ class MainWindow(QMainWindow):
 
         if overview:
             table.setMinimumWidth(NAME_COL_WIDTH + ID_COL_WIDTH + date_count * DAY_COL_WIDTH + 8)
-            table.setFixedHeight(38 + max(1, row_count) * COMPACT_ROW_HEIGHT)
+            table.setFixedHeight(36 + max(1, row_count) * COMPACT_ROW_HEIGHT)
 
     def _make_schedule_view_table(self, result: ScheduleResult) -> QTableWidget:
         dates = month_dates(result.year, result.month)
