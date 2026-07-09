@@ -238,6 +238,8 @@ class MainWindow(QMainWindow):
         self.rules = ShiftRules()
         self._updating_table = False
         self._year_overview_refresh_pending = False
+        self._year_overview_dirty = True
+        self._cumulative_stats_dirty = True
         self._suppress_month_reload = False
         self._loading_split_controls = False
         self._schedule_header_menu_connected = False
@@ -329,7 +331,7 @@ class MainWindow(QMainWindow):
         if app:
             app.installEventFilter(self)
         self.load_selected_month_from_db(refresh_overview=False)
-        self.render_year_overview()
+        self.mark_year_overview_dirty()
 
     @staticmethod
     def legacy_source_name(year: int, month: int) -> str:
@@ -583,7 +585,7 @@ class MainWindow(QMainWindow):
         self.refresh_validation_and_stats()
         self.update_schedule_source_status()
         if refresh_overview:
-            self.schedule_year_overview_refresh()
+            self.mark_year_overview_dirty()
 
     def on_team_split_controls_changed(self) -> None:
         if self._loading_split_controls:
@@ -591,8 +593,24 @@ class MainWindow(QMainWindow):
         self.save_team_split_settings()
         self.update_schedule_source_status()
         self.load_selected_month_from_db(refresh_overview=False)
-        self.render_cumulative_stats()
-        self.schedule_year_overview_refresh()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
+
+    def on_tab_changed(self, index: int) -> None:
+        if index == getattr(self, "year_tab_index", -1) and self._year_overview_dirty:
+            self.schedule_year_overview_refresh()
+        elif index == getattr(self, "stats_tab_index", -1) and self._cumulative_stats_dirty:
+            self.render_cumulative_stats()
+
+    def mark_year_overview_dirty(self) -> None:
+        self._year_overview_dirty = True
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == getattr(self, "year_tab_index", -1):
+            self.schedule_year_overview_refresh()
+
+    def mark_cumulative_stats_dirty(self) -> None:
+        self._cumulative_stats_dirty = True
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == getattr(self, "stats_tab_index", -1):
+            self.render_cumulative_stats()
 
     def _build_rule_widgets(self) -> None:
         def spin(value: int, minimum: int = 0, maximum: int = 31) -> QSpinBox:
@@ -619,7 +637,7 @@ class MainWindow(QMainWindow):
             self.result.holidays = korean_holidays(self.result.year)
             self.render_schedule_table()
             self.refresh_validation_and_stats()
-        self.render_year_overview()
+        self.mark_year_overview_dirty()
 
     def add_selected_holiday(self) -> None:
         add_custom_holiday(self.selected_calendar_date())
@@ -728,13 +746,13 @@ class MainWindow(QMainWindow):
         self.year_scroll_layout = QVBoxLayout(self.year_scroll_content)
         self.year_scroll.setWidget(self.year_scroll_content)
         year_layout.addWidget(self.year_scroll)
-        tabs.addTab(year_tab, "연간 보기")
+        self.year_tab_index = tabs.addTab(year_tab, "연간 보기")
 
         schedule_tab = QWidget()
         schedule_layout = QVBoxLayout(schedule_tab)
         schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 이 표 아무 셀에 커서를 두고 Ctrl+V 하세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
         schedule_layout.addWidget(self.schedule_table)
-        tabs.addTab(schedule_tab, "월간 근무표")
+        self.schedule_tab_index = tabs.addTab(schedule_tab, "월간 근무표")
 
         stats_tab = QWidget()
         stats_layout = QVBoxLayout(stats_tab)
@@ -761,7 +779,7 @@ class MainWindow(QMainWindow):
         period_layout.addStretch(1)
         stats_layout.addLayout(period_layout)
         stats_layout.addWidget(self.cumulative_stats_table)
-        tabs.addTab(stats_tab, "통계")
+        self.stats_tab_index = tabs.addTab(stats_tab, "통계")
 
         settings_tab = QWidget()
         settings_layout = QHBoxLayout(settings_tab)
@@ -786,7 +804,7 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(holiday_group)
         settings_layout.addWidget(rule_group)
         settings_layout.addStretch(1)
-        tabs.addTab(settings_tab, "근무 설정")
+        self.settings_tab_index = tabs.addTab(settings_tab, "근무 설정")
 
         splitter.addWidget(tabs)
         splitter.addWidget(self.warning_box)
@@ -797,6 +815,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([650, 160])
         root_layout.addWidget(splitter)
         self.setCentralWidget(root)
+        self.tabs.currentChanged.connect(self.on_tab_changed)
         self.tabs.setCurrentIndex(1)
 
     def add_employee_rows(self, employees: List[Employee]) -> None:
@@ -1000,10 +1019,10 @@ class MainWindow(QMainWindow):
         self.refresh_validation_and_stats()
         try:
             self.save_result_silently(self.result)
-            self.render_cumulative_stats()
+            self.mark_cumulative_stats_dirty()
         except Exception as exc:
             QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
-        self.schedule_year_overview_refresh()
+        self.mark_year_overview_dirty()
         QMessageBox.information(self, "근무표 반영", f"{year}년 {month}월 표에서 {len(self.employees)}명을 인식했고 DB에 자동 저장했습니다.")
 
     @staticmethod
@@ -1076,10 +1095,10 @@ class MainWindow(QMainWindow):
         self.refresh_validation_and_stats()
         try:
             self.save_result_silently(self.result)
-            self.render_cumulative_stats()
+            self.mark_cumulative_stats_dirty()
         except Exception as exc:
             QMessageBox.warning(self, "자동 저장 실패", f"근무표는 반영됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
-        self.schedule_year_overview_refresh()
+        self.mark_year_overview_dirty()
         QMessageBox.information(self, "근무표 반영", f"{source_label}에서 {len(self.employees)}명을 인식했고 DB에 자동 저장했습니다.")
 
     def import_schedule_excel(self) -> None:
@@ -1149,7 +1168,8 @@ class MainWindow(QMainWindow):
             self.employees = list(result.employees)
             self.render_schedule_table()
             self.refresh_validation_and_stats()
-        self.schedule_year_overview_refresh()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
 
     def clear_selected_schedule_cells(self, table: QTableWidget, result: Optional[ScheduleResult]) -> None:
         if not isinstance(result, ScheduleResult):
@@ -1193,7 +1213,8 @@ class MainWindow(QMainWindow):
             self.employees = list(result.employees)
             self.render_schedule_table()
             self.refresh_validation_and_stats()
-        self.schedule_year_overview_refresh()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
 
     def save_result_silently(self, result: ScheduleResult) -> None:
         self.save_result_to_db(result)
@@ -1355,8 +1376,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "DB 저장 실패", str(exc))
             return
-        self.render_cumulative_stats()
-        self.schedule_year_overview_refresh()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
         QMessageBox.information(self, "DB 저장 완료", f"근무표를 DB에 저장했습니다. ID: {schedule_id}")
 
     def export_excel(self) -> None:
@@ -1407,7 +1428,7 @@ class MainWindow(QMainWindow):
         self.apply_split_legacy_prefix(self.result)
         self.render_schedule_table()
         self.refresh_validation_and_stats()
-        self.schedule_year_overview_refresh()
+        self.mark_year_overview_dirty()
 
     def _clear_layout(self, layout: QVBoxLayout) -> None:
         while layout.count():
@@ -1510,6 +1531,7 @@ class MainWindow(QMainWindow):
     def render_year_overview(self) -> None:
         if not hasattr(self, "year_scroll_layout"):
             return
+        self._year_overview_dirty = False
         self._clear_layout(self.year_scroll_layout)
         end_year = max(date.today().year, self.year_spin.value(), OVERVIEW_START_YEAR)
         for year in range(OVERVIEW_START_YEAR, end_year + 1):
@@ -1574,8 +1596,8 @@ class MainWindow(QMainWindow):
             self.add_employee_rows(self.result.employees)
             self.render_schedule_table()
             self.refresh_validation_and_stats()
-        self.render_cumulative_stats()
-        self.schedule_year_overview_refresh()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
         QMessageBox.information(self, "초기화 완료", f"{year}년 {month}월 {source_label} 근무표를 초기화했습니다. 삭제된 저장본: {deleted}개")
 
     def render_schedule_table(self) -> None:
@@ -1682,7 +1704,8 @@ class MainWindow(QMainWindow):
             self.result = result
             self.render_schedule_table()
             self.refresh_validation_and_stats()
-        self.schedule_year_overview_refresh()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
 
     @staticmethod
     def normalize_shift(text: str) -> str:
@@ -1906,6 +1929,7 @@ class MainWindow(QMainWindow):
         table.verticalHeader().setVisible(False)
 
     def render_cumulative_stats(self) -> None:
+        self._cumulative_stats_dirty = False
         month_rows = saved_months()
         if self.stats_mode_combo.currentText() == "월간 통계":
             self.render_month_stats_as_main()
