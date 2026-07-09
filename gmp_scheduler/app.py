@@ -285,6 +285,10 @@ class MainWindow(QMainWindow):
         self.month_split_layout = QVBoxLayout(self.month_split_content)
         self.month_split_scroll.setWidget(self.month_split_content)
         self.month_split_scroll.hide()
+        self.create_schedule_btn = QPushButton("근무표 생성")
+        self.create_schedule_btn.setStyleSheet("font-weight: 700; padding: 8px;")
+        self.create_schedule_btn.clicked.connect(self.create_missing_schedule_for_current_page)
+        self.create_schedule_btn.hide()
 
         self.month_stats_table = QTableWidget()
         self.cumulative_stats_table = QTableWidget()
@@ -722,6 +726,7 @@ class MainWindow(QMainWindow):
         schedule_tab = QWidget()
         schedule_layout = QVBoxLayout(schedule_tab)
         schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 이 표 아무 셀에 커서를 두고 Ctrl+V 하세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
+        schedule_layout.addWidget(self.create_schedule_btn)
         schedule_layout.addWidget(self.schedule_table)
         schedule_layout.addWidget(self.month_split_scroll)
         self.schedule_tab_index = tabs.addTab(schedule_tab, "월간 근무표")
@@ -1009,6 +1014,89 @@ class MainWindow(QMainWindow):
             for day_map in result.schedule.values()
             for shift in day_map.values()
         )
+
+    def current_roster_source_name(self) -> str:
+        year = self.year_spin.value()
+        month = self.month_spin.value()
+        if self.month_has_team_dates(year, month):
+            self.clamp_month_split_page(year, month)
+            return TEAM_VIEWS[self.month_split_page_index]
+        return self.source_name_for_view(year, month)
+
+    def schedule_source_has_saved_data(self, year: int, month: int, source_name: str) -> bool:
+        return self.load_existing_schedule_for_source(year, month, source_name) is not None
+
+    def should_offer_schedule_generation(self, result: ScheduleResult, source_name: str) -> bool:
+        if self.is_team_source(source_name):
+            return not self.schedule_source_has_saved_data(result.year, result.month, source_name)
+        return not self.result_has_work_marks(result)
+
+    def update_create_schedule_button(
+        self,
+        result: Optional[ScheduleResult],
+        source_name: Optional[str] = None,
+    ) -> None:
+        if not hasattr(self, "create_schedule_btn"):
+            return
+        if result is None:
+            self.create_schedule_btn.hide()
+            return
+        target_source = source_name or self.storage_source_name(result)
+        should_show = self.should_offer_schedule_generation(result, target_source)
+        if self.is_team_source(target_source):
+            self.create_schedule_btn.setText(f"{target_source} 근무표 생성")
+        else:
+            self.create_schedule_btn.setText("근무표 생성")
+        self.create_schedule_btn.setVisible(should_show)
+
+    def seed_employees_from_previous_schedule(self, year: int, month: int, source_name: str) -> List[Employee]:
+        seed_year = year
+        seed_month = month
+        for _ in range(24):
+            seed_year, seed_month = self.shift_month_values(seed_year, seed_month, -1)
+            seed_source = (
+                source_name
+                if self.is_team_source(source_name) and self.month_has_team_dates(seed_year, seed_month)
+                else self.legacy_source_name(seed_year, seed_month)
+            )
+            previous = self.load_existing_schedule_for_source(seed_year, seed_month, seed_source)
+            if previous and previous.employees:
+                return [
+                    Employee(emp.name, emp.employee_id, emp.is_new, set())
+                    for emp in previous.employees
+                ]
+        return []
+
+    def generation_rules_message(self) -> str:
+        self.sync_rules_from_widgets()
+        return (
+            "아래 규칙으로 현재 월/페이지 근무표를 자동 생성합니다.\n\n"
+            f"- 평일 최소 인원: D {self.rules.min_weekday.get(SHIFT_DAY, 0)}명, "
+            f"S {self.rules.min_weekday.get(SHIFT_SWING, 0)}명, "
+            f"G/지근 {self.rules.min_weekday.get(SHIFT_GY, 0)}명\n"
+            f"- 휴일/주말 최소 인원: D {self.rules.min_holiday.get(SHIFT_DAY, 0)}명, "
+            f"S {self.rules.min_holiday.get(SHIFT_SWING, 0)}명, "
+            f"당직 {self.rules.min_holiday.get(SHIFT_DUTY, 0)}명\n"
+            f"- 최대 연속 근무: {self.rules.max_consecutive_work_days}일\n"
+            f"- 최대 연속 G/당직: {self.rules.max_consecutive_gy}일\n"
+            "- 직원별 불가일은 근무 배정에서 제외합니다.\n"
+            "- 전월 말 당직 이월 규칙을 반영합니다.\n\n"
+            "확인을 누르면 바로 생성하고 DB에 자동 저장합니다."
+        )
+
+    def confirm_generation_rules(self) -> bool:
+        answer = QMessageBox.question(
+            self,
+            "근무표 생성 규칙",
+            self.generation_rules_message(),
+            QMessageBox.Ok | QMessageBox.Cancel,
+            QMessageBox.Ok,
+        )
+        return answer == QMessageBox.Ok
+
+    def create_missing_schedule_for_current_page(self) -> None:
+        source_name = self.current_roster_source_name()
+        self.generate_schedule(source_name=source_name)
 
     @staticmethod
     def merge_unavailable_into_employees(
@@ -1417,31 +1505,53 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(self, "저장 완료", path)
 
-    def generate_schedule(self) -> None:
+    def generate_schedule(
+        self,
+        _checked: bool = False,
+        *,
+        source_name: Optional[str] = None,
+        confirm_rules: bool = True,
+    ) -> None:
+        if hasattr(self, "require_admin") and not self.require_admin("근무표 자동 생성"):
+            return
+        if confirm_rules and not self.confirm_generation_rules():
+            return
         self.sync_rules_from_widgets()
+        year = self.year_spin.value()
+        month = self.month_spin.value()
+        target_source = source_name or self.current_roster_source_name()
         self.employees = self.collect_employees()
         if not self.employees and self.result:
             self.employees = list(self.result.employees)
+        if not self.employees:
+            self.employees = self.seed_employees_from_previous_schedule(year, month, target_source)
+            if self.employees:
+                self.add_employee_rows(self.employees)
         if len(self.employees) < 3:
             QMessageBox.warning(self, "생성 불가", "D/S/G 최소 인원을 채우려면 직원이 최소 3명 필요합니다.")
             return
         try:
             self.result = generate_month_schedule(
                 self.employees,
-                self.year_spin.value(),
-                self.month_spin.value(),
+                year,
+                month,
                 self.rules,
                 previous_day_duty_employee_keys=self.previous_month_last_duty_keys(
-                    self.year_spin.value(),
-                    self.month_spin.value(),
-                    self.source_name_for_view(self.year_spin.value(), self.month_spin.value()),
+                    year,
+                    month,
+                    target_source,
                 ),
             )
         except ScheduleError as exc:
             QMessageBox.warning(self, "생성 실패", str(exc))
             return
-        self.result.source_name = self.source_name_for_view(self.result.year, self.result.month)
+        self.result.source_name = target_source
         self.apply_split_legacy_prefix(self.result)
+        try:
+            self.save_result_silently(self.result)
+            self.mark_cumulative_stats_dirty()
+        except Exception as exc:
+            QMessageBox.warning(self, "자동 저장 실패", f"근무표는 생성됐지만 DB 자동 저장에 실패했습니다.\n{exc}")
         self.render_schedule_table()
         self.refresh_validation_and_stats()
         self.mark_year_overview_dirty()
@@ -1648,6 +1758,7 @@ class MainWindow(QMainWindow):
         ) else self.load_schedule_for_view(year, month, team)
         self.apply_previous_month_gy_carryover(result)
         self.apply_split_legacy_prefix(result)
+        self.update_create_schedule_button(result, team)
 
         nav = QHBoxLayout()
         prev_btn = QPushButton("Prev Page")
@@ -1666,6 +1777,7 @@ class MainWindow(QMainWindow):
 
     def render_schedule_table(self) -> None:
         if not self.result:
+            self.update_create_schedule_button(None)
             return
         self._updating_table = True
         dates = month_dates(self.result.year, self.result.month)
@@ -1720,6 +1832,7 @@ class MainWindow(QMainWindow):
         self.schedule_table.verticalHeader().setVisible(False)
         self.configure_roster_table_layout(self.schedule_table, len(dates), len(self.result.employees), overview=False)
         self.schedule_table.freezeColumnCount if hasattr(self.schedule_table, "freezeColumnCount") else None
+        self.update_create_schedule_button(self.result)
         self._updating_table = False
 
     def on_schedule_cell_changed(self, row: int, col: int) -> None:
