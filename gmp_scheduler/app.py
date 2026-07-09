@@ -276,6 +276,10 @@ class MainWindow(QMainWindow):
             | QAbstractItemView.EditKeyPressed
             | QAbstractItemView.AnyKeyPressed
         )
+        self.schedule_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.schedule_table.customContextMenuRequested.connect(
+            lambda pos: self.show_schedule_cell_menu(self.schedule_table, self.result, pos)
+        )
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
         self.month_split_scroll = QScrollArea()
         self.month_split_scroll.setWidgetResizable(True)
@@ -1306,6 +1310,109 @@ class MainWindow(QMainWindow):
         self.mark_cumulative_stats_dirty()
         self.mark_year_overview_dirty()
 
+    def schedule_context_cells(self, table: QTableWidget, pos) -> List[tuple[int, int]]:
+        index = table.indexAt(pos)
+        if not index.isValid() or index.column() < 2:
+            return []
+        clicked = (index.row(), index.column())
+        selected = sorted(
+            {(idx.row(), idx.column()) for idx in table.selectedIndexes() if idx.column() >= 2}
+        )
+        if clicked not in selected:
+            table.clearSelection()
+            table.setCurrentCell(index.row(), index.column())
+            item = table.item(index.row(), index.column())
+            if item is not None:
+                item.setSelected(True)
+            return [clicked]
+        return selected or [clicked]
+
+    def show_schedule_cell_menu(self, table: QTableWidget, result: Optional[ScheduleResult], pos) -> None:
+        if not isinstance(result, ScheduleResult):
+            return
+        cells = self.schedule_context_cells(table, pos)
+        if not cells:
+            return
+        menu = QMenu(self)
+        menu.addAction("데이 (D)").triggered.connect(
+            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_DAY)
+        )
+        menu.addAction("스윙 (S)").triggered.connect(
+            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_SWING)
+        )
+        menu.addAction("GY/지근").triggered.connect(
+            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_GY)
+        )
+        menu.addAction("당직").triggered.connect(
+            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, SHIFT_DUTY)
+        )
+        menu.addSeparator()
+        menu.addAction("근무불가").triggered.connect(
+            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, None, mark_unavailable=True)
+        )
+        menu.addAction("비우기").triggered.connect(
+            lambda _checked=False, c=cells: self.apply_schedule_cells_choice(table, result, c, OFF)
+        )
+        menu.exec(table.viewport().mapToGlobal(pos))
+
+    def apply_schedule_cells_choice(
+        self,
+        table: QTableWidget,
+        result: ScheduleResult,
+        cells: List[tuple[int, int]],
+        shift: Optional[str],
+        *,
+        mark_unavailable: bool = False,
+    ) -> None:
+        if hasattr(self, "require_admin") and not self.require_admin("근무표 셀 변경"):
+            return
+        dates = month_dates(result.year, result.month)
+        changed = False
+        table.blockSignals(True)
+        try:
+            for row, col in cells:
+                if row < 0 or row >= len(result.employees):
+                    continue
+                day_index = col - 2
+                if day_index < 0 or day_index >= len(dates):
+                    continue
+                emp = result.employees[row]
+                d = dates[day_index]
+                if self.is_locked_split_cell(result, d):
+                    continue
+                item = table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    table.setItem(row, col, item)
+                if mark_unavailable:
+                    emp.unavailable_dates.add(d)
+                    normalized = OFF
+                else:
+                    emp.unavailable_dates.discard(d)
+                    normalized = normalize_shift_code(shift or OFF)
+                result.schedule.setdefault(d, {})[emp.key] = normalized
+                item.setText("" if normalized == OFF else normalized)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.apply_schedule_cell_background(item, result, emp, d, normalized, include_validation=True)
+                changed = True
+        finally:
+            table.blockSignals(False)
+        if not changed:
+            return
+        self.save_result_silently(result)
+        if (
+            self.result
+            and self.result.year == result.year
+            and self.result.month == result.month
+            and self.storage_source_name(self.result) == self.storage_source_name(result)
+        ):
+            self.result = result
+            self.employees = list(result.employees)
+            self.render_schedule_table()
+            self.refresh_validation_and_stats()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
+
     def save_result_silently(self, result: ScheduleResult) -> None:
         self.save_result_to_db(result)
 
@@ -1628,6 +1735,10 @@ class MainWindow(QMainWindow):
         table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         table.horizontalHeader().customContextMenuRequested.connect(
             lambda pos, t=table: self.show_date_header_menu(t, pos)
+        )
+        table.setContextMenuPolicy(Qt.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos, t=table: self.show_schedule_cell_menu(t, getattr(t, "result", None), pos)
         )
         for col, d in enumerate(dates, start=2):
             item = table.horizontalHeaderItem(col)
