@@ -575,8 +575,6 @@ class MainWindow(QMainWindow):
             return
         if not self._preserve_roster_page_on_load:
             self.month_split_page_index = 0
-        if hasattr(self, "tabs") and self.tabs.currentIndex() != getattr(self, "schedule_tab_index", -1):
-            self.tabs.setCurrentIndex(self.schedule_tab_index)
         self.load_selected_month_from_db()
 
     def on_tab_changed(self, index: int) -> None:
@@ -723,13 +721,14 @@ class MainWindow(QMainWindow):
         year_layout.addWidget(self.year_scroll)
         self.year_tab_index = tabs.addTab(year_tab, "연간 보기")
 
-        schedule_tab = QWidget()
-        schedule_layout = QVBoxLayout(schedule_tab)
+        self.schedule_tab_index = -1
+        self.schedule_tab_container = QWidget()
+        self.schedule_tab_container.hide()
+        schedule_layout = QVBoxLayout(self.schedule_tab_container)
         schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 이 표 아무 셀에 커서를 두고 Ctrl+V 하세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
         schedule_layout.addWidget(self.create_schedule_btn)
         schedule_layout.addWidget(self.schedule_table)
         schedule_layout.addWidget(self.month_split_scroll)
-        self.schedule_tab_index = tabs.addTab(schedule_tab, "월간 근무표")
 
         stats_tab = QWidget()
         stats_layout = QVBoxLayout(stats_tab)
@@ -793,7 +792,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(splitter)
         self.setCentralWidget(root)
         self.tabs.currentChanged.connect(self.on_tab_changed)
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(self.year_tab_index)
 
     def add_employee_rows(self, employees: List[Employee]) -> None:
         self.employee_table.setRowCount(0)
@@ -1097,6 +1096,25 @@ class MainWindow(QMainWindow):
     def create_missing_schedule_for_current_page(self) -> None:
         source_name = self.current_roster_source_name()
         self.generate_schedule(source_name=source_name)
+
+    def create_schedule_for_month_source(self, year: int, month: int, source_name: str) -> None:
+        view = source_name if self.is_team_source(source_name) else None
+        self.set_current_month(year, month)
+        self.result = self.load_schedule_for_view(year, month, view)
+        self.apply_previous_month_gy_carryover(self.result)
+        self.apply_split_legacy_prefix(self.result)
+        self.employees = list(self.result.employees)
+        self.add_employee_rows(self.employees)
+        self.generate_schedule(source_name=source_name)
+
+    def make_schedule_generate_button(self, year: int, month: int, source_name: str) -> QPushButton:
+        button = QPushButton("근무표 생성")
+        button.setFixedWidth(105)
+        button.setEnabled(getattr(self, "is_admin", True))
+        button.clicked.connect(
+            lambda _checked=False, y=year, m=month, s=source_name: self.create_schedule_for_month_source(y, m, s)
+        )
+        return button
 
     @staticmethod
     def merge_unavailable_into_employees(
@@ -1680,9 +1698,14 @@ class MainWindow(QMainWindow):
                             result = self.load_schedule_for_view(year, month, team)
                             status = "기존 복사본" if result.employees else "미작성"
                         self.apply_split_legacy_prefix(result)
+                        team_row = QHBoxLayout()
                         team_title = QLabel(f"{team} · {status}")
                         team_title.setStyleSheet("font-size: 13px; font-weight: 700; margin-top: 4px;")
-                        self.year_scroll_layout.addWidget(team_title)
+                        team_row.addWidget(team_title)
+                        team_row.addStretch(1)
+                        if self.should_offer_schedule_generation(result, source_name):
+                            team_row.addWidget(self.make_schedule_generate_button(year, month, source_name))
+                        self.year_scroll_layout.addLayout(team_row)
                         self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
                     continue
                 source_name = self.source_name_for_view(year, month)
@@ -1706,6 +1729,8 @@ class MainWindow(QMainWindow):
                 clear_btn.clicked.connect(lambda _checked=False, y=year, m=month: self.clear_month_schedule(y, m))
                 title_row.addWidget(title)
                 title_row.addStretch(1)
+                if self.should_offer_schedule_generation(result, source_name):
+                    title_row.addWidget(self.make_schedule_generate_button(year, month, source_name))
                 title_row.addWidget(clear_btn)
                 self.year_scroll_layout.addLayout(title_row)
                 self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
