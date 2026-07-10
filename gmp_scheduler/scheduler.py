@@ -10,7 +10,7 @@ from .holiday_balance import holiday_run_positions
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .pairing import PAIR_CATEGORY_ORDER, pair_category, pair_coverage
 from .rule_utils import day_shift_key_for_date, min_rules_for_date
-from .schedule_utils import GY_BLOCK_DAYS
+from .schedule_utils import GY_BLOCK_DAYS, next_workday_after
 from .validation import validate_schedule
 
 
@@ -32,6 +32,7 @@ def generate_month_schedule(
     rules = rules or ShiftRules()
     rng = random.Random(seed)
     dates = month_dates(year, month)
+    date_set = set(dates)
     holidays = korean_holidays(year)
     holiday_positions = holiday_run_positions(dates, holidays)
     schedule: ScheduleMap = {d: {e.key: OFF for e in employees} for d in dates}
@@ -181,12 +182,14 @@ def generate_month_schedule(
             and d not in e.unavailable_dates
             and not e.pair_required
             and (not e.day_only or shift == SHIFT_DAY)
+            and can_reserve_projected_rest(e, d, shift)
         ]
         if not candidates:
             return False
         candidates.sort(key=lambda e: candidate_score(e, d, shift))
         chosen = candidates[0]
         mark_assignment(chosen, d, shift)
+        reserve_projected_rest(chosen, d, shift)
         mark_projected_rest(chosen, d, shift)
         return True
 
@@ -208,7 +211,7 @@ def generate_month_schedule(
                 return False
             if schedule[d].get(emp.key, OFF) != OFF:
                 return False
-        return True
+        return can_reserve_projected_rest(emp, start, SHIFT_GY)
 
     def gy_block_dates(start: date) -> List[date]:
         result: List[date] = []
@@ -223,15 +226,28 @@ def generate_month_schedule(
 
     def projected_rest_dates(start: date, shift: str) -> List[date]:
         if shift == SHIFT_DUTY:
-            rest_date = start + timedelta(days=1)
+            rest_date = next_workday_after(start, date_set, holidays)
             return [rest_date] if rest_date in schedule else []
         if shift != SHIFT_GY:
             return []
         block = gy_block_dates(start)
         if not block:
             return []
-        rest_date = block[-1] + timedelta(days=1)
+        rest_date = next_workday_after(block[-1], date_set, holidays)
         return [rest_date] if rest_date in schedule else []
+
+    def can_reserve_projected_rest(emp: Employee, start: date, shift: str) -> bool:
+        for rest_date in projected_rest_dates(start, shift):
+            current = schedule.get(rest_date, {}).get(emp.key, OFF)
+            if current not in (OFF, SHIFT_GY_REST, ""):
+                return False
+        return True
+
+    def reserve_projected_rest(emp: Employee, start: date, shift: str) -> None:
+        for rest_date in projected_rest_dates(start, shift):
+            current = schedule.get(rest_date, {}).get(emp.key, OFF)
+            if current in (OFF, SHIFT_GY_REST, ""):
+                schedule[rest_date][emp.key] = SHIFT_GY_REST
 
     def projected_module_rest_conflicts(emp: Employee, start: date, shift: str) -> int:
         if not emp.module:
@@ -256,13 +272,13 @@ def generate_month_schedule(
 
     def mark_initial_projected_rests() -> None:
         for emp in employees:
-            if not emp.module:
-                continue
             for d in dates:
                 shift = schedule.get(d, {}).get(emp.key, OFF)
                 if shift == SHIFT_DUTY:
+                    reserve_projected_rest(emp, d, SHIFT_DUTY)
                     mark_projected_rest(emp, d, SHIFT_DUTY)
                 elif shift == SHIFT_GY and schedule.get(d - timedelta(days=1), {}).get(emp.key, OFF) != SHIFT_GY:
+                    reserve_projected_rest(emp, d, SHIFT_GY)
                     mark_projected_rest(emp, d, SHIFT_GY)
 
     mark_initial_projected_rests()
@@ -282,6 +298,7 @@ def generate_month_schedule(
         chosen = candidates[0]
         for cur in gy_block_dates(d):
             mark_assignment(chosen, cur, SHIFT_GY)
+        reserve_projected_rest(chosen, d, SHIFT_GY)
         mark_projected_rest(chosen, d, SHIFT_GY)
         return True
 

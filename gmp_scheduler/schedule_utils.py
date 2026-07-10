@@ -1,13 +1,22 @@
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import List
+from datetime import date, timedelta
+from typing import List, Optional, Set
 
-from .calendar_utils import is_duty_day, month_dates
+from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates
 from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap
 
 
 GY_BLOCK_DAYS = 6
+
+
+def next_workday_after(d: date, valid_dates: Set[date], holidays: Set[date]) -> Optional[date]:
+    cur = d + timedelta(days=1)
+    while cur in valid_dates:
+        if not is_holiday_or_weekend(cur, holidays):
+            return cur
+        cur += timedelta(days=1)
+    return None
 
 
 def expand_gy_blocks(employees: List[Employee], year: int, month: int, schedule: ScheduleMap) -> None:
@@ -22,6 +31,7 @@ def expand_gy_blocks(employees: List[Employee], year: int, month: int, schedule:
     """
     dates = month_dates(year, month)
     valid_dates = set(dates)
+    holidays = korean_holidays(year)
     original_gy_or_duty_by_date = {
         d: {
             emp.key
@@ -40,6 +50,7 @@ def expand_gy_blocks(employees: List[Employee], year: int, month: int, schedule:
                 continue
             starts.append(d)
         for start in starts:
+            block = [start]
             for offset in range(1, GY_BLOCK_DAYS):
                 d = start + timedelta(days=offset)
                 if d not in valid_dates:
@@ -53,3 +64,9 @@ def expand_gy_blocks(employees: List[Employee], year: int, month: int, schedule:
                     break
                 if current in (OFF, SHIFT_GY_REST, ""):
                     schedule[d][emp.key] = SHIFT_GY
+                    block.append(d)
+            rest_date = next_workday_after(block[-1], valid_dates, holidays)
+            if rest_date is not None:
+                current = schedule.setdefault(rest_date, {}).get(emp.key, OFF)
+                if current in (OFF, SHIFT_GY_REST, ""):
+                    schedule[rest_date][emp.key] = SHIFT_GY_REST
