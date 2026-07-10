@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QDate, QEvent, QMimeData, QObject, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence
+from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -101,6 +101,76 @@ RULE_SETTING_OPTIONS = (
 LEGACY_LABEL = "기존"
 LOCKED_SPLIT_COLOR = QColor("#f3f3f3")
 TEAM_SPLIT_START_DATE = date(2026, 8, 1)
+
+
+def apply_light_theme(app: QApplication) -> None:
+    app.setStyle("Fusion")
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor("#ffffff"))
+    palette.setColor(QPalette.WindowText, QColor("#202124"))
+    palette.setColor(QPalette.Base, QColor("#ffffff"))
+    palette.setColor(QPalette.AlternateBase, QColor("#f7f9fc"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#ffffff"))
+    palette.setColor(QPalette.ToolTipText, QColor("#202124"))
+    palette.setColor(QPalette.Text, QColor("#202124"))
+    palette.setColor(QPalette.Button, QColor("#f8f9fa"))
+    palette.setColor(QPalette.ButtonText, QColor("#202124"))
+    palette.setColor(QPalette.BrightText, QColor("#ffffff"))
+    palette.setColor(QPalette.Link, QColor("#1a73e8"))
+    palette.setColor(QPalette.Highlight, QColor("#cfe3ff"))
+    palette.setColor(QPalette.HighlightedText, QColor("#111111"))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#8a8f98"))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#8a8f98"))
+    app.setPalette(palette)
+    app.setStyleSheet(
+        """
+        QMainWindow, QDialog, QWidget, QTabWidget::pane, QScrollArea {
+            background-color: #ffffff;
+            color: #202124;
+        }
+        QGroupBox {
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #d8dce3;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+            background-color: #ffffff;
+        }
+        QLineEdit, QTextEdit, QSpinBox, QComboBox, QDateEdit, QTableWidget, QListWidget {
+            background-color: #ffffff;
+            color: #202124;
+            selection-background-color: #cfe3ff;
+            selection-color: #111111;
+        }
+        QHeaderView::section {
+            background-color: #f3f6fa;
+            color: #202124;
+            border: 1px solid #d8dce3;
+        }
+        QPushButton {
+            background-color: #f8f9fa;
+            color: #202124;
+            border: 1px solid #c9cdd3;
+            border-radius: 4px;
+            padding: 4px 8px;
+        }
+        QPushButton:hover {
+            background-color: #eef3f8;
+        }
+        QPushButton:pressed {
+            background-color: #e2e8f0;
+        }
+        QPushButton:disabled {
+            background-color: #f1f3f5;
+            color: #8a8f98;
+        }
+        """
+    )
 
 
 class UpdateCheckWorker(QObject):
@@ -4224,6 +4294,7 @@ class MainWindow(QMainWindow):
 
 def run() -> None:
     app = QApplication(sys.argv)
+    apply_light_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
