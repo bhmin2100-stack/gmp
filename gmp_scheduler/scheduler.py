@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
+from .pairing import PAIR_CATEGORY_ORDER, pair_category, pair_coverage
 from .rule_utils import day_shift_key_for_date, min_rules_for_date
 from .schedule_utils import GY_BLOCK_DAYS
 from .validation import validate_schedule
@@ -32,6 +33,7 @@ def generate_month_schedule(
     dates = month_dates(year, month)
     holidays = korean_holidays(year)
     schedule: ScheduleMap = {d: {e.key: OFF for e in employees} for d in dates}
+    employee_by_key = {e.key: e for e in employees}
     counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     previous_day_duty_employee_keys = previous_day_duty_employee_keys or set()
     week_dates: Dict[date, List[date]] = defaultdict(list)
@@ -144,7 +146,6 @@ def generate_month_schedule(
             counts[emp.key]["holiday_work"] += 1
 
     if initial_schedule:
-        employee_by_key = {emp.key: emp for emp in employees}
         for d, day_map in initial_schedule.items():
             if d not in schedule:
                 continue
@@ -161,6 +162,7 @@ def generate_month_schedule(
             e for e in employees
             if schedule[d].get(e.key, OFF) == OFF
             and d not in e.unavailable_dates
+            and not e.pair_required
             and (not e.day_only or shift == SHIFT_DAY)
         ]
         if not candidates:
@@ -171,10 +173,14 @@ def generate_month_schedule(
         return True
 
     def assigned_count(d: date, shift: str) -> int:
-        return sum(1 for current in schedule.get(d, {}).values() if current == shift)
+        return sum(
+            1
+            for emp_key, current in schedule.get(d, {}).items()
+            if current == shift and not (employee_by_key.get(emp_key) and employee_by_key[emp_key].pair_required)
+        )
 
     def can_start_gy_block(emp: Employee, start: date) -> bool:
-        if emp.day_only:
+        if emp.day_only or emp.pair_required:
             return False
         for d in gy_block_dates(start):
             if d in emp.unavailable_dates:
@@ -225,6 +231,64 @@ def generate_month_schedule(
                     break
         for _ in range(max(0, required_gy - assigned_count(d, gy_shift))):
             assign_one(d, gy_shift)
+
+    def shift_allowed_for_pair(emp: Employee, shift: str) -> bool:
+        return not emp.day_only or shift == SHIFT_DAY
+
+    def mentor_gy_block_dates(mentor: Employee, start: date) -> List[date]:
+        block: List[date] = []
+        cur = start
+        while cur in schedule and schedule[cur].get(mentor.key, OFF) == SHIFT_GY:
+            block.append(cur)
+            cur += timedelta(days=1)
+        return block
+
+    def candidate_pair_block(emp: Employee, mentor: Employee, d: date, shift: str) -> Optional[List[date]]:
+        if not shift_allowed_for_pair(emp, shift):
+            return None
+        block = [d]
+        if shift == SHIFT_GY:
+            if schedule.get(d - timedelta(days=1), {}).get(mentor.key, OFF) == SHIFT_GY:
+                return None
+            block = mentor_gy_block_dates(mentor, d)
+        for cur in block:
+            if cur in emp.unavailable_dates:
+                return None
+            if schedule.get(cur, {}).get(emp.key, OFF) != OFF:
+                return None
+        return block
+
+    def assign_pair_category(emp: Employee, category: str) -> bool:
+        candidates: List[tuple[float, date, str, List[date]]] = []
+        for d in dates:
+            for mentor in employees:
+                if mentor.key == emp.key or mentor.pair_required:
+                    continue
+                shift = schedule.get(d, {}).get(mentor.key, OFF)
+                if pair_category(d, shift, holidays) != category:
+                    continue
+                block = candidate_pair_block(emp, mentor, d, shift)
+                if not block:
+                    continue
+                penalty = counts[emp.key]["total"] * 20 + counts[emp.key][week_bucket(d)] * 10 + len(block)
+                candidates.append((penalty, d, shift, block))
+        if not candidates:
+            return False
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        _, _, shift, block = candidates[0]
+        for cur in block:
+            mark_assignment(emp, cur, shift)
+        return True
+
+    for emp in employees:
+        if not emp.pair_required:
+            continue
+        covered = pair_coverage(schedule, employees, emp, dates, holidays)
+        for category in PAIR_CATEGORY_ORDER:
+            if category in covered:
+                continue
+            if assign_pair_category(emp, category):
+                covered = pair_coverage(schedule, employees, emp, dates, holidays)
 
     result = ScheduleResult(year=year, month=month, employees=employees, schedule=schedule, holidays=holidays)
     result.warnings = validate_schedule(employees, year, month, schedule, holidays, rules)

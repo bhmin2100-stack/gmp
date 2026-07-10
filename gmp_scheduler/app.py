@@ -73,6 +73,7 @@ UNAVAILABLE_COLOR = QColor("#e7e6e6")
 HOLIDAY_HEADER_COLOR = QColor("#fde9d9")
 FAMILY_HEADER_COLOR = QColor("#d9eaf7")
 DAY_ONLY_COLOR = QColor("#fff4b8")
+PAIR_REQUIRED_COLOR = QColor("#f8d7e8")
 STAFFING_OK_COLOR = QColor("#008000")
 OVERVIEW_START_YEAR = 2025
 NAME_COL_WIDTH = 70
@@ -291,8 +292,8 @@ class MainWindow(QMainWindow):
 
         self._build_rule_widgets()
 
-        self.employee_table = ScheduleInputTable(self, 0, 6)
-        self.employee_table.setHorizontalHeaderLabels(["성명", "사번", "신규", "불가일(YYYY-MM-DD, ...)", "모듈", "Day만"])
+        self.employee_table = ScheduleInputTable(self, 0, 7)
+        self.employee_table.setHorizontalHeaderLabels(["성명", "사번", "신규", "불가일(YYYY-MM-DD, ...)", "모듈", "Day만", "페어"])
         self.employee_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.employee_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.employee_table.customContextMenuRequested.connect(self.show_employee_module_menu)
@@ -561,7 +562,7 @@ class MainWindow(QMainWindow):
         if self.result:
             module_by_key = {emp.key: emp.module for emp in self.employees}
             self.result.employees = [
-                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_by_key.get(emp.key, emp.module), emp.day_only)
+                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_by_key.get(emp.key, emp.module), emp.day_only, emp.pair_required)
                 for emp in self.result.employees
             ]
         self.statusBar().showMessage(f"{len(rows)}명 모듈 설정 완료", 4000)
@@ -584,16 +585,16 @@ class MainWindow(QMainWindow):
             if f"{name}|{employee_no}" in keys:
                 self.employee_table.setItem(row, 4, QTableWidgetItem(module_name))
         self.employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only)
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only, emp.pair_required)
             for emp in self.collect_employees()
         ]
         result.employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only)
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only, emp.pair_required)
             for emp in result.employees
         ]
         if self.result and result.year == self.result.year and result.month == self.result.month:
             self.result.employees = [
-                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only)
+                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only, emp.pair_required)
                 for emp in self.result.employees
             ]
         self.save_result_silently(result)
@@ -630,6 +631,8 @@ class MainWindow(QMainWindow):
             label = emp.name if not emp.employee_id else f"{emp.name} / {emp.employee_id}"
             if emp.day_only:
                 label += " · Day만"
+            if emp.pair_required:
+                label += " · 페어"
             member_list.addItem(label)
         if not members:
             member_list.addItem("해당 모듈 인원이 없습니다.")
@@ -810,7 +813,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def clone_schedule_result(result: ScheduleResult, source_name: Optional[str] = None) -> ScheduleResult:
         employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module, emp.day_only)
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module, emp.day_only, emp.pair_required)
             for emp in result.employees
         ]
         schedule = {
@@ -871,7 +874,7 @@ class MainWindow(QMainWindow):
         employee_by_key = {emp.key: emp for emp in result.employees}
         for emp in legacy.employees:
             if emp.key not in employee_by_key:
-                copied = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module, emp.day_only)
+                copied = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module, emp.day_only, emp.pair_required)
                 result.employees.append(copied)
                 employee_by_key[copied.key] = copied
 
@@ -1476,6 +1479,7 @@ class MainWindow(QMainWindow):
             self.employee_table.setItem(row, 3, QTableWidgetItem(unavailable))
             self.employee_table.setItem(row, 4, QTableWidgetItem(emp.module))
             self.employee_table.setItem(row, 5, QTableWidgetItem("Y" if emp.day_only else ""))
+            self.employee_table.setItem(row, 6, QTableWidgetItem("Y" if emp.pair_required else ""))
         self.apply_access_mode()
 
     def sync_rules_from_widgets(
@@ -1527,6 +1531,8 @@ class MainWindow(QMainWindow):
             module = self._cell_text(self.employee_table, row, 4)
             day_only_text = self._cell_text(self.employee_table, row, 5).lower()
             day_only = day_only_text in ("y", "yes", "true", "1", "day", "d", "데이", "ㅇ", "o")
+            pair_text = self._cell_text(self.employee_table, row, 6).lower()
+            pair_required = pair_text in ("y", "yes", "true", "1", "pair", "페어", "ㅇ", "o")
             emp = Employee(
                 name=name,
                 employee_id=employee_id,
@@ -1534,6 +1540,7 @@ class MainWindow(QMainWindow):
                 unavailable_dates=unavailable,
                 module=module,
                 day_only=day_only,
+                pair_required=pair_required,
             )
             if emp.key in seen:
                 continue
@@ -1827,11 +1834,26 @@ class MainWindow(QMainWindow):
         weight_text = ""
         if weight_lines:
             weight_text = f"- 모듈 가중치:\n{chr(10).join(weight_lines)}\n"
+        pair_names = [
+            emp.name or emp.employee_id
+            for emp in self.collect_employees()
+            if emp.pair_required
+        ]
+        pair_text = ""
+        if pair_names:
+            shown = ", ".join(pair_names[:8])
+            if len(pair_names) > 8:
+                shown += f" 외 {len(pair_names) - 8}명"
+            pair_text = (
+                f"- 페어근무자: {shown}\n"
+                "  평일 D/S, 주말/휴일 D/S, GY/당직을 기존 근무자와 각 1회씩 배정합니다.\n"
+            )
         fixed_text = "- 현재 표시된 근무는 고정하고, 부족한 근무만 자동 배정합니다.\n" if preserve_manual else ""
         return (
             f"아래 규칙으로 {target_source} 근무표를 자동 생성합니다.\n\n"
             f"{chr(10).join(rule_lines)}\n"
             f"{weight_text}"
+            f"{pair_text}"
             f"{fixed_text}"
             f"- 최대 연속 근무: {rules.max_consecutive_work_days}일\n"
             f"- 최대 연속 G/당직: {rules.max_consecutive_gy}일\n"
@@ -2016,7 +2038,7 @@ class MainWindow(QMainWindow):
         for emp in employees:
             dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
             if dates:
-                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module, emp.day_only))
+                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module, emp.day_only, emp.pair_required))
             else:
                 updated.append(emp)
         return updated
@@ -2107,7 +2129,7 @@ class MainWindow(QMainWindow):
             if self.is_locked_split_cell(result, d):
                 continue
             if d not in emp.unavailable_dates:
-                updated[row] = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | {d}, emp.module, emp.day_only)
+                updated[row] = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | {d}, emp.module, emp.day_only, emp.pair_required)
                 hit += 1
         if hit <= 0:
             return False
@@ -2340,6 +2362,7 @@ class MainWindow(QMainWindow):
                 set(emp.unavailable_dates),
                 emp.module,
                 enabled if emp.key in keys else emp.day_only,
+                emp.pair_required,
             )
             for emp in result.employees
         ]
@@ -2362,6 +2385,46 @@ class MainWindow(QMainWindow):
         self.mark_cumulative_stats_dirty()
         self.mark_year_overview_dirty()
         label = "Day만 근무가능" if enabled else "Day만 해제"
+        self.statusBar().showMessage(f"{len(keys)}명 {label} 완료", 4000)
+
+    def apply_pair_required_to_schedule_rows(self, result: ScheduleResult, rows: List[int], enabled: bool) -> None:
+        if hasattr(self, "require_admin") and not self.require_admin("페어근무자 설정"):
+            return
+        valid_rows = sorted({row for row in rows if 0 <= row < len(result.employees)})
+        if not valid_rows:
+            return
+        keys = {result.employees[row].key for row in valid_rows}
+        result.employees = [
+            Employee(
+                emp.name,
+                emp.employee_id,
+                emp.is_new,
+                set(emp.unavailable_dates),
+                emp.module,
+                emp.day_only,
+                enabled if emp.key in keys else emp.pair_required,
+            )
+            for emp in result.employees
+        ]
+        for row in range(self.employee_table.rowCount()):
+            name = self._cell_text(self.employee_table, row, 0)
+            employee_no = self._cell_text(self.employee_table, row, 1)
+            if f"{name}|{employee_no}" in keys:
+                self.employee_table.setItem(row, 6, QTableWidgetItem("Y" if enabled else ""))
+        if (
+            self.result
+            and result.year == self.result.year
+            and result.month == self.result.month
+            and self.storage_source_name(result) == self.storage_source_name(self.result)
+        ):
+            self.result = result
+            self.employees = list(result.employees)
+        self.save_result_silently(result)
+        self.render_schedule_table()
+        self.refresh_validation_and_stats()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
+        label = "페어근무자" if enabled else "페어근무자 해제"
         self.statusBar().showMessage(f"{len(keys)}명 {label} 완료", 4000)
 
     def delete_schedule_rows(self, result: ScheduleResult, rows: List[int]) -> None:
@@ -2438,6 +2501,12 @@ class MainWindow(QMainWindow):
             day_only_action.setChecked(all(0 <= row < len(result.employees) and result.employees[row].day_only for row in rows))
             day_only_action.triggered.connect(
                 lambda checked=False, r=rows: self.apply_day_only_to_schedule_rows(result, r, checked)
+            )
+            pair_action = menu.addAction("페어근무자")
+            pair_action.setCheckable(True)
+            pair_action.setChecked(all(0 <= row < len(result.employees) and result.employees[row].pair_required for row in rows))
+            pair_action.triggered.connect(
+                lambda checked=False, r=rows: self.apply_pair_required_to_schedule_rows(result, r, checked)
             )
             menu.addSeparator()
             menu.addAction("인원 삭제").triggered.connect(
@@ -2648,7 +2717,7 @@ class MainWindow(QMainWindow):
             dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
             if dates:
                 hit += len(dates)
-                new_emp = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module, emp.day_only)
+                new_emp = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module, emp.day_only, emp.pair_required)
                 updated.append(new_emp)
             else:
                 updated.append(emp)
@@ -2945,11 +3014,21 @@ class MainWindow(QMainWindow):
                 id_item = QTableWidgetItem(emp.employee_id)
                 name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
                 id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+                markers = []
                 if emp.day_only:
+                    markers.append("Day만 근무가능")
+                if emp.pair_required:
+                    markers.append("페어근무자")
+                if emp.pair_required:
+                    name_item.setBackground(PAIR_REQUIRED_COLOR)
+                    id_item.setBackground(PAIR_REQUIRED_COLOR)
+                elif emp.day_only:
                     name_item.setBackground(DAY_ONLY_COLOR)
                     id_item.setBackground(DAY_ONLY_COLOR)
-                    name_item.setToolTip("Day만 근무가능")
-                    id_item.setToolTip("Day만 근무가능")
+                if markers:
+                    tooltip = "\n".join(markers)
+                    name_item.setToolTip(tooltip)
+                    id_item.setToolTip(tooltip)
                 table.setItem(row, 0, name_item)
                 table.setItem(row, 1, id_item)
                 for col, d in enumerate(dates, start=2):
@@ -3147,11 +3226,21 @@ class MainWindow(QMainWindow):
             id_item = QTableWidgetItem(emp.employee_id)
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
             id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+            markers = []
             if emp.day_only:
+                markers.append("Day만 근무가능")
+            if emp.pair_required:
+                markers.append("페어근무자")
+            if emp.pair_required:
+                name_item.setBackground(PAIR_REQUIRED_COLOR)
+                id_item.setBackground(PAIR_REQUIRED_COLOR)
+            elif emp.day_only:
                 name_item.setBackground(DAY_ONLY_COLOR)
                 id_item.setBackground(DAY_ONLY_COLOR)
-                name_item.setToolTip("Day만 근무가능")
-                id_item.setToolTip("Day만 근무가능")
+            if markers:
+                tooltip = "\n".join(markers)
+                name_item.setToolTip(tooltip)
+                id_item.setToolTip(tooltip)
             self.schedule_table.setItem(row, 0, name_item)
             self.schedule_table.setItem(row, 1, id_item)
             for col, d in enumerate(dates, start=2):

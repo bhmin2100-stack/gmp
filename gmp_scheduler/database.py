@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS unavailable_days (
     FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE,
     UNIQUE(employee_id, work_date, source_name)
 );
+
+CREATE TABLE IF NOT EXISTS schedule_employee_flags (
+    schedule_id INTEGER NOT NULL,
+    employee_id INTEGER NOT NULL,
+    pair_required INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(schedule_id, employee_id),
+    FOREIGN KEY(schedule_id) REFERENCES monthly_schedules(id) ON DELETE CASCADE,
+    FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
+);
 """
 
 
@@ -177,6 +186,18 @@ def save_schedule(result: ScheduleResult, source_name: str = "") -> int:
         conn.execute("DELETE FROM assignments WHERE schedule_id=?", (schedule_id,))
 
         emp_ids = {emp.key: upsert_employee(conn, emp) for emp in result.employees}
+        conn.execute("DELETE FROM schedule_employee_flags WHERE schedule_id=?", (schedule_id,))
+        for emp in result.employees:
+            if emp.pair_required:
+                conn.execute(
+                    """
+                    INSERT INTO schedule_employee_flags(schedule_id, employee_id, pair_required)
+                    VALUES (?, ?, 1)
+                    ON CONFLICT(schedule_id, employee_id)
+                    DO UPDATE SET pair_required=excluded.pair_required
+                    """,
+                    (schedule_id, emp_ids[emp.key]),
+                )
         for d in month_dates(result.year, result.month):
             for emp in result.employees:
                 conn.execute(
@@ -413,9 +434,21 @@ def load_schedule_result(
             return None
         rows = conn.execute(
             """
-            SELECT e.id AS employee_db_id, e.name, e.employee_no, e.is_new, e.module, e.day_only, a.work_date, a.shift_code
+            SELECT
+                e.id AS employee_db_id,
+                e.name,
+                e.employee_no,
+                e.is_new,
+                e.module,
+                e.day_only,
+                COALESCE(sef.pair_required, 0) AS pair_required,
+                a.work_date,
+                a.shift_code
             FROM assignments a
             JOIN employees e ON e.id = a.employee_id
+            LEFT JOIN schedule_employee_flags sef
+                ON sef.schedule_id = a.schedule_id
+                AND sef.employee_id = e.id
             WHERE a.schedule_id=?
             ORDER BY a.work_date, a.id
             """,
@@ -426,13 +459,20 @@ def load_schedule_result(
 
         selected_source_name = str(sched["source_name"] or "")
         employee_ids_by_key: Dict[str, int] = {}
-        employee_meta_by_key: Dict[str, tuple[str, str, bool, str, bool]] = {}
+        employee_meta_by_key: Dict[str, tuple[str, str, bool, str, bool, bool]] = {}
         for row in rows:
             name = str(row["name"])
             employee_no = str(row["employee_no"] or "")
             key = f"{name}|{employee_no}"
             employee_ids_by_key[key] = int(row["employee_db_id"])
-            employee_meta_by_key[key] = (name, employee_no, bool(row["is_new"]), str(row["module"] or ""), bool(row["day_only"]))
+            employee_meta_by_key[key] = (
+                name,
+                employee_no,
+                bool(row["is_new"]),
+                str(row["module"] or ""),
+                bool(row["day_only"]),
+                bool(row["pair_required"]),
+            )
         unavailable_by_key: Dict[str, Set[date]] = {key: set() for key in employee_meta_by_key}
         if employee_ids_by_key:
             placeholders = ",".join("?" for _ in employee_ids_by_key)
@@ -458,8 +498,8 @@ def load_schedule_result(
                 if key:
                     unavailable_by_key.setdefault(key, set()).add(date.fromisoformat(str(unavailable_row["work_date"])))
         employees = [
-            Employee(name, employee_no, is_new, unavailable_by_key.get(key, set()), module, day_only)
-            for key, (name, employee_no, is_new, module, day_only) in employee_meta_by_key.items()
+            Employee(name, employee_no, is_new, unavailable_by_key.get(key, set()), module, day_only, pair_required)
+            for key, (name, employee_no, is_new, module, day_only, pair_required) in employee_meta_by_key.items()
         ]
         schedule: ScheduleMap = {d: {emp.key: OFF for emp in employees} for d in month_dates(year, month)}
         for row in rows:

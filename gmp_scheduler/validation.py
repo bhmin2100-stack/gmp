@@ -6,6 +6,7 @@ from typing import Dict, List, Set
 
 from .calendar_utils import is_duty_day, month_dates
 from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ShiftRules
+from .pairing import PAIR_CATEGORY_LABELS, PAIR_CATEGORY_ORDER, pair_coverage
 from .rule_utils import min_rules_for_date
 from .stats import compute_stats
 
@@ -22,16 +23,23 @@ def validate_schedule(
     employee_by_key = {e.key: e for e in employees}
 
     for d in month_dates(year, month):
-        counts = Counter(
+        actual_counts = Counter(
             shift for shift in schedule.get(d, {}).values()
             if shift and shift not in (OFF, SHIFT_GY_REST)
+        )
+        counts = Counter(
+            shift
+            for emp_key, shift in schedule.get(d, {}).items()
+            if shift
+            and shift not in (OFF, SHIFT_GY_REST)
+            and not (employee_by_key.get(emp_key) and employee_by_key[emp_key].pair_required)
         )
         min_rules = min_rules_for_date(rules, d, holidays)
         for shift, minimum in min_rules.items():
             actual = counts[shift]
             if actual < minimum:
                 warnings.append(f"{d.isoformat()} {shift} 최소 인원 부족: {actual}/{minimum}")
-        if counts[SHIFT_DUTY] and counts[SHIFT_GY]:
+        if actual_counts[SHIFT_DUTY] and actual_counts[SHIFT_GY]:
             warnings.append(f"{d.isoformat()} 당직일에는 G/지근이 같이 있을 수 없음")
 
         for emp_key, shift in schedule.get(d, {}).items():
@@ -91,4 +99,12 @@ def validate_schedule(
             warnings.append(f"신규 {emp.name} 휴일 D/S 경험 없음")
         if s.weekday_gy == 0:
             warnings.append(f"신규 {emp.name} 평일 G/지근 경험 없음")
+    dates = month_dates(year, month)
+    for emp in employees:
+        if not emp.pair_required:
+            continue
+        covered = pair_coverage(schedule, employees, emp, dates, holidays)
+        missing = [PAIR_CATEGORY_LABELS[key] for key in PAIR_CATEGORY_ORDER if key not in covered]
+        if missing:
+            warnings.append(f"페어 {emp.name} 미충족: {', '.join(missing)}")
     return warnings

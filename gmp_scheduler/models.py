@@ -44,6 +44,7 @@ class Employee:
     unavailable_dates: Set[date] = field(default_factory=set)
     module: str = ""
     day_only: bool = False
+    pair_required: bool = False
 
     @property
     def key(self) -> str:
