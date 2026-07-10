@@ -110,6 +110,22 @@ def fetch_update_info(timeout: int = 10) -> UpdateInfo:
             ) from direct_error
 
 
+def direct_download_update_info() -> UpdateInfo:
+    return UpdateInfo(
+        current_version=current_version(),
+        current_build_id=current_build_id(),
+        current_commit=str(BUILD_COMMIT or ""),
+        latest_version=current_version(),
+        latest_build_id="direct-download",
+        latest_commit="",
+        latest_build_date="",
+        release_url=RELEASE_PAGE_URL,
+        exe_url=DIRECT_EXE_URL,
+        sha256="",
+        size=0,
+    )
+
+
 def _fetch_update_info_from_api(timeout: int = 10) -> UpdateInfo:
     release = _read_json(RELEASE_API_URL, timeout=timeout)
     assets = release.get("assets") or []

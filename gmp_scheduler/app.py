@@ -1214,7 +1214,21 @@ class MainWindow(QMainWindow):
     def on_update_check_finished(self, info: object, error: object, manual: bool) -> None:
         if error:
             if manual:
-                QMessageBox.warning(self, "업데이트 확인", f"업데이트 확인에 실패했습니다.\n\n{error}")
+                if updater.is_packaged_app():
+                    answer = QMessageBox.question(
+                        self,
+                        "업데이트 확인 실패",
+                        "업데이트 버전 정보를 확인하지 못했습니다.\n\n"
+                        f"{error}\n\n"
+                        "회사망에서 GitHub API나 version.json만 막히는 경우가 있습니다.\n"
+                        "그래도 최신 EXE 파일 직접 다운로드를 시도할까요?",
+                        QMessageBox.Ok | QMessageBox.Cancel,
+                        QMessageBox.Ok,
+                    )
+                    if answer == QMessageBox.Ok:
+                        self.start_update_download(updater.direct_download_update_info())
+                else:
+                    QMessageBox.warning(self, "업데이트 확인", f"업데이트 확인에 실패했습니다.\n\n{error}")
             return
         if not isinstance(info, updater.UpdateInfo):
             return
@@ -1301,7 +1315,13 @@ class MainWindow(QMainWindow):
         if dialog is not None:
             dialog.close()
         if error:
-            QMessageBox.warning(self, "업데이트", f"업데이트 다운로드에 실패했습니다.\n\n{error}")
+            QMessageBox.warning(
+                self,
+                "업데이트",
+                "업데이트 다운로드에 실패했습니다.\n\n"
+                f"{error}\n\n"
+                f"수동 다운로드: {updater.RELEASE_PAGE_URL}",
+            )
             return
         if not isinstance(path, Path):
             QMessageBox.warning(self, "업데이트", "업데이트 파일 경로를 확인할 수 없습니다.")
