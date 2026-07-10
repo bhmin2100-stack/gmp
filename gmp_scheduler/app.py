@@ -47,6 +47,7 @@ from .calendar_settings import add_custom_family_day, add_custom_holiday, remove
 from .calendar_utils import family_days, is_duty_day, is_family_day, is_holiday_or_weekend, korean_holidays, month_dates, weekday_ko
 from .database import DB_PATH, delete_month_schedule, export_database, load_schedule_result, period_assignment_rows, replace_database_from_file, save_schedule, save_unavailable_days, saved_months
 from .excel_io import export_schedule_to_excel, gray_cell_offsets_from_html_rows, import_schedule_from_excel, normalize_shift_code, parse_employees_from_tsv, parse_html_table, parse_schedule_from_clipboard, parse_schedule_from_html_rows, parse_schedule_from_tsv, parse_unavailable, parse_unavailable_from_clipboard, parse_unavailable_from_html_rows, parse_unavailable_from_html_rows_by_position
+from .holiday_balance import holiday_run_positions
 from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .module_settings import load_modules, save_modules
 from .rule_settings import load_team_rules, save_team_rules
@@ -449,6 +450,7 @@ class MainWindow(QMainWindow):
             ("holiday", "공휴일"),
             ("saturday", "토요일"),
             ("sunday", "일요일"),
+            ("long_holiday_middle", "연휴 중간"),
         ]
         self.monthly_stats_shift_types = [
             ("day", "Day"),
@@ -460,6 +462,7 @@ class MainWindow(QMainWindow):
             for date_key, _date_label in self.monthly_stats_date_types
             for shift_key, _shift_label in self.monthly_stats_shift_types
         }
+        self._monthly_stats_holiday_position_cache: Dict[int, Dict[date, str]] = {}
         self.cumulative_stats_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.cumulative_stats_table.customContextMenuRequested.connect(self.show_stats_table_menu)
         self.calendar_date_edit = QDateEdit()
@@ -1120,6 +1123,7 @@ class MainWindow(QMainWindow):
         return date(qdate.year(), qdate.month(), qdate.day())
 
     def refresh_calendar_after_override(self) -> None:
+        self._monthly_stats_holiday_position_cache = {}
         if self.result:
             self.result.holidays = korean_holidays(self.result.year)
             self.render_schedule_table()
@@ -3942,6 +3946,16 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_row)
         dialog.exec()
 
+    def monthly_stats_holiday_positions(self, year: int) -> Dict[date, str]:
+        cached = self._monthly_stats_holiday_position_cache.get(year)
+        if cached is not None:
+            return cached
+        dates = [cur for month in range(1, 13) for cur in month_dates(year, month)]
+        holidays = korean_holidays(year - 1) | korean_holidays(year) | korean_holidays(year + 1)
+        positions = dict(holiday_run_positions(dates, holidays))
+        self._monthly_stats_holiday_position_cache[year] = positions
+        return positions
+
     def monthly_stats_date_keys(self, d: date) -> set[str]:
         official_holidays = korean_holidays(d.year) - family_days(d.year)
         keys: set[str] = set()
@@ -3955,6 +3969,8 @@ class MainWindow(QMainWindow):
             keys.add("sunday")
         elif not keys:
             keys.add("weekday")
+        if self.monthly_stats_holiday_positions(d.year).get(d) == "middle":
+            keys.add("long_holiday_middle")
         return keys
 
     @staticmethod
