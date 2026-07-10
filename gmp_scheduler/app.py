@@ -245,6 +245,11 @@ class MainWindow(QMainWindow):
         self.month_spin.setValue(date.today().month)
 
         self.schedule_source_label = QLabel("")
+        self.roster_view_combo = QComboBox()
+        self.roster_view_combo.addItem("전체", "")
+        for team in TEAM_VIEWS:
+            self.roster_view_combo.addItem(team, team)
+        self.roster_view_combo.currentIndexChanged.connect(lambda _index: self.on_roster_view_filter_changed())
 
         self._build_rule_widgets()
 
@@ -364,6 +369,24 @@ class MainWindow(QMainWindow):
     def selected_schedule_view(self) -> str:
         return VIEW_LEGACY
 
+    def selected_roster_view_filter(self) -> str:
+        if not hasattr(self, "roster_view_combo"):
+            return ""
+        value = self.roster_view_combo.currentData()
+        return str(value) if value in TEAM_VIEWS else ""
+
+    def roster_views_for_year_overview(self, year: int, month: int) -> tuple[str, ...]:
+        if not self.month_has_team_dates(year, month):
+            return ()
+        selected = self.selected_roster_view_filter()
+        if selected in TEAM_VIEWS:
+            return (selected,)
+        return TEAM_VIEWS
+
+    def on_roster_view_filter_changed(self) -> None:
+        self.update_schedule_source_status()
+        self.render_year_overview()
+
     def split_date(self) -> date:
         return TEAM_SPLIT_START_DATE
 
@@ -397,7 +420,9 @@ class MainWindow(QMainWindow):
         month = self.month_spin.value()
         label = self.source_label_for_view(year, month)
         if self.month_has_team_dates(year, month):
-            self.schedule_source_label.setText(f"보기: V11 위 / V12 아래 · 기준 {self.split_date():%Y-%m}")
+            selected = self.selected_roster_view_filter()
+            view_label = selected if selected in TEAM_VIEWS else "V11 위 / V12 아래"
+            self.schedule_source_label.setText(f"보기: {view_label} · 기준 {self.split_date():%Y-%m}")
         else:
             self.schedule_source_label.setText(f"보기/저장: {label} · V11/V12는 {self.split_date():%Y-%m}부터")
 
@@ -1029,6 +1054,11 @@ class MainWindow(QMainWindow):
         year_tab = QWidget()
         year_layout = QVBoxLayout(year_tab)
         year_layout.addWidget(QLabel("선택한 연도/월의 근무표입니다. PageUp/PageDown, 좌우 화살표, 또는 상단 연도/월 변경으로 다른 월을 봅니다. 표를 클릭하고 Ctrl+V 하면 해당 월에 엑셀 근무표가 바로 붙습니다."))
+        roster_filter_row = QHBoxLayout()
+        roster_filter_row.addWidget(QLabel("보기 대상"))
+        roster_filter_row.addWidget(self.roster_view_combo)
+        roster_filter_row.addStretch(1)
+        year_layout.addLayout(roster_filter_row)
         self.year_scroll = QScrollArea()
         self.year_scroll.setWidgetResizable(True)
         self.year_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1465,6 +1495,9 @@ class MainWindow(QMainWindow):
         year = self.year_spin.value()
         month = self.month_spin.value()
         if self.month_has_team_dates(year, month):
+            selected = self.selected_roster_view_filter()
+            if selected in TEAM_VIEWS:
+                return selected
             self.clamp_month_split_page(year, month)
             return TEAM_VIEWS[self.month_split_page_index]
         return self.source_name_for_view(year, month)
@@ -2678,7 +2711,7 @@ class MainWindow(QMainWindow):
             self.year_scroll_layout.addWidget(self._make_schedule_view_table(result))
 
         if self.month_has_team_dates(year, month):
-            for team in TEAM_VIEWS:
+            for team in self.roster_views_for_year_overview(year, month):
                 source_name = self.source_name_for_view(year, month, team)
                 result, status = resolve_result(source_name, team)
                 add_roster_section(self.source_label_for_view(year, month, team), result, status, source_name, False)
