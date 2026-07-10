@@ -3809,8 +3809,42 @@ class MainWindow(QMainWindow):
     def latest_stats_people_only(self) -> bool:
         return bool(hasattr(self, "stats_latest_people_check") and self.stats_latest_people_check.isChecked())
 
+    def saved_team_roster_people(self, source_name: str) -> Dict[str, Dict[str, str]]:
+        if not self.is_team_source(source_name):
+            return {}
+        rows = sorted(
+            (
+                row for row in saved_months()
+                if str(row.get("source_name") or "") == source_name
+            ),
+            key=lambda row: (
+                int(row.get("year") or 0),
+                int(row.get("month") or 0),
+                str(row.get("imported_at") or ""),
+            ),
+        )
+        people: Dict[str, Dict[str, str]] = {}
+        for row in rows:
+            result = load_schedule_result(
+                int(row.get("year") or 0),
+                int(row.get("month") or 0),
+                source_name=source_name,
+            )
+            if not result:
+                continue
+            for emp in result.employees:
+                people[emp.key] = {"name": emp.name, "employee_no": emp.employee_id}
+        return people
+
+    def saved_team_member_keys(self, source_name: str) -> set[str]:
+        return set(self.saved_team_roster_people(source_name))
+
     def latest_stats_people(self, year: int, month: int) -> Dict[str, Dict[str, str]]:
         selected_source = self.selected_stats_source_name()
+        if self.is_team_source(selected_source):
+            people = self.saved_team_roster_people(selected_source)
+            if people:
+                return people
         sources: List[Optional[str]]
         if selected_source:
             sources = [selected_source]
@@ -4156,6 +4190,16 @@ class MainWindow(QMainWindow):
         rows = self.filter_period_rows_for_split(rows)
         if not selected_source:
             return rows
+        if self.is_team_source(selected_source):
+            team_member_keys = self.saved_team_member_keys(selected_source)
+            return [
+                row for row in rows
+                if str(row.get("source_name") or "") == selected_source
+                or (
+                    str(row.get("source_name") or "") not in TEAM_VIEWS
+                    and f"{row.get('name') or ''}|{row.get('employee_no') or ''}" in team_member_keys
+                )
+            ]
         return [
             row for row in rows
             if str(row.get("source_name") or "") == selected_source
