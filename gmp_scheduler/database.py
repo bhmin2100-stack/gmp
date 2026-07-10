@@ -7,11 +7,12 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
 
+from .app_paths import app_data_file
 from .calendar_utils import is_holiday_or_weekend, month_dates
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult
 from .stats import EmployeeStats, compute_stats
 
-DB_PATH = Path("gmp_scheduler.sqlite3")
+DB_PATH = app_data_file("gmp_scheduler.sqlite3")
 REQUIRED_TABLES = {"employees", "monthly_schedules", "assignments"}
 
 

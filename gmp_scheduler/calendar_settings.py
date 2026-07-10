@@ -5,8 +5,10 @@ from datetime import date
 from pathlib import Path
 from typing import Dict, Set
 
+from .app_paths import app_data_file
 
-SETTINGS_PATH = Path("calendar_overrides.json")
+
+SETTINGS_PATH = app_data_file("calendar_overrides.json")
 
 
 def _empty() -> Dict[str, list[str]]:
@@ -41,6 +43,7 @@ def load_calendar_settings() -> Dict[str, Set[date]]:
 
 def save_calendar_settings(settings: Dict[str, Set[date]]) -> None:
     data = {key: sorted(d.isoformat() for d in values) for key, values in settings.items()}
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 from typing import Dict
 
+from .app_paths import app_data_file
 
-SETTINGS_PATH = Path("stats_exclusions.json")
+
+SETTINGS_PATH = app_data_file("stats_exclusions.json")
 
 
 def _empty() -> Dict[str, Dict[str, str]]:
@@ -31,6 +33,7 @@ def load_stats_exclusions() -> Dict[str, Dict[str, str]]:
 
 
 def save_stats_exclusions(data: Dict[str, Dict[str, str]]) -> None:
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

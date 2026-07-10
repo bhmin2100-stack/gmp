@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 from typing import Dict
 
+from .app_paths import app_data_file
 from .models import ShiftRules
 
-RULE_SETTINGS_PATH = Path("rule_settings.json")
+RULE_SETTINGS_PATH = app_data_file("rule_settings.json")
 TEAM_RULE_KEYS = ("combined", "V11", "V12")
 
 
@@ -104,4 +105,5 @@ def save_team_rules(rules_by_team: Dict[str, ShiftRules], path: Path = RULE_SETT
             for key in TEAM_RULE_KEYS
         }
     }
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

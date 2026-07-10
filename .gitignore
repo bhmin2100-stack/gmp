@@ -20,6 +20,8 @@ gmp_scheduler/build_info.py
 module_settings.json
 rule_settings.json
 team_split_settings.json
+calendar_overrides.json
+stats_exclusions.json
 
 # OS / IDE
 .DS_Store

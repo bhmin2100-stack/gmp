@@ -193,7 +193,7 @@ def download_update(
     progress: Optional[Callable[[int, int], None]] = None,
     timeout: int = 30,
 ) -> Path:
-    update_dir = Path(tempfile.gettempdir()) / "gmp_scheduler_update"
+    update_dir = update_work_dir()
     update_dir.mkdir(parents=True, exist_ok=True)
     target = update_dir / f"{_safe_name(info.latest_build_id or info.latest_version)}.new.exe"
     hasher = hashlib.sha256()
@@ -250,6 +250,10 @@ def launch_self_update(downloaded_exe: Path) -> None:
         close_fds=True,
         creationflags=creationflags,
     )
+
+
+def update_work_dir() -> Path:
+    return Path(tempfile.gettempdir()) / "gmp_scheduler_update"
 
 
 def _read_json(url: str, timeout: int) -> dict:
@@ -338,9 +342,11 @@ def _ps_quote(value: Path | str) -> str:
 
 
 def _write_update_script(current_exe: Path, downloaded_exe: Path, pid: int) -> Path:
-    script = Path(tempfile.gettempdir()) / f"gmp_scheduler_update_{pid}.ps1"
-    log_path = Path(tempfile.gettempdir()) / "gmp_scheduler_update.log"
-    backup_exe = current_exe.with_suffix(current_exe.suffix + ".bak")
+    update_dir = update_work_dir()
+    update_dir.mkdir(parents=True, exist_ok=True)
+    script = update_dir / f"gmp_scheduler_update_{pid}.ps1"
+    log_path = update_dir / "gmp_scheduler_update.log"
+    backup_exe = update_dir / f"{current_exe.name}.bak"
     script.write_text(
         f"""
 $ErrorActionPreference = 'Stop'

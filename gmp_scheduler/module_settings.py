@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 from typing import List
 
-MODULE_SETTINGS_PATH = Path("module_settings.json")
+from .app_paths import app_data_file
+
+MODULE_SETTINGS_PATH = app_data_file("module_settings.json")
 
 
 def load_modules(path: Path = MODULE_SETTINGS_PATH) -> List[str]:
@@ -39,6 +41,7 @@ def save_modules(modules: List[str], path: Path = MODULE_SETTINGS_PATH) -> None:
             continue
         seen.add(name)
         cleaned.append(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps({"modules": cleaned}, ensure_ascii=False, indent=2),
         encoding="utf-8",
