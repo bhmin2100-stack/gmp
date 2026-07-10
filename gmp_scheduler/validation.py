@@ -6,7 +6,7 @@ from typing import Dict, List, Set
 
 from .calendar_utils import is_duty_day, month_dates
 from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ShiftRules
-from .pairing import PAIR_CATEGORY_LABELS, PAIR_CATEGORY_ORDER, pair_coverage
+from .pairing import PAIR_CATEGORY_LABELS, PAIR_CATEGORY_ORDER, pair_category, pair_coverage
 from .rule_utils import min_rules_for_date
 from .stats import compute_stats
 
@@ -41,6 +41,20 @@ def validate_schedule(
                 warnings.append(f"{d.isoformat()} {shift} 최소 인원 부족: {actual}/{minimum}")
         if actual_counts[SHIFT_DUTY] and actual_counts[SHIFT_GY]:
             warnings.append(f"{d.isoformat()} 당직일에는 G/지근이 같이 있을 수 없음")
+        for shift, actual in actual_counts.items():
+            if actual <= 2 or not pair_category(d, shift, holidays):
+                continue
+            pair_names = [
+                employee_by_key[emp_key].name
+                for emp_key, current in schedule.get(d, {}).items()
+                if current == shift
+                and employee_by_key.get(emp_key)
+                and employee_by_key[emp_key].pair_required
+            ]
+            if pair_names:
+                warnings.append(
+                    f"{d.isoformat()} {shift} 페어 동시근무 2명 초과: 전체 {actual}명 / 페어 {', '.join(pair_names)}"
+                )
 
         for emp_key, shift in schedule.get(d, {}).items():
             emp = employee_by_key.get(emp_key)

@@ -197,6 +197,9 @@ def generate_month_schedule(
             if current == shift and not (employee_by_key.get(emp_key) and employee_by_key[emp_key].pair_required)
         )
 
+    def shift_group_size(d: date, shift: str) -> int:
+        return sum(1 for current in schedule.get(d, {}).values() if current == shift)
+
     def can_start_gy_block(emp: Employee, start: date) -> bool:
         if emp.day_only or emp.pair_required:
             return False
@@ -321,10 +324,15 @@ def generate_month_schedule(
                 return None
             if schedule.get(cur, {}).get(emp.key, OFF) != OFF:
                 return None
+            if shift_group_size(cur, shift) >= 2:
+                return None
         return block
 
+    pair_mentor_counts: Dict[tuple[str, str], int] = defaultdict(int)
+    pair_mentor_loads: Dict[str, int] = defaultdict(int)
+
     def assign_pair_category(emp: Employee, category: str) -> bool:
-        candidates: List[tuple[float, date, str, List[date]]] = []
+        candidates: List[tuple[float, float, date, str, Employee, List[date]]] = []
         for d in dates:
             for mentor in employees:
                 if mentor.key == emp.key or mentor.pair_required:
@@ -335,14 +343,21 @@ def generate_month_schedule(
                 block = candidate_pair_block(emp, mentor, d, shift)
                 if not block:
                     continue
-                penalty = counts[emp.key]["total"] * 20 + counts[emp.key][week_bucket(d)] * 10 + len(block)
-                candidates.append((penalty, d, shift, block))
+                score = sum(candidate_score(emp, cur, shift)[0] for cur in block)
+                score += pair_mentor_counts[(emp.key, mentor.key)] * 180
+                score += pair_mentor_loads[mentor.key] * 45
+                score += counts[emp.key]["total"] * 20
+                score += counts[emp.key][week_bucket(d)] * 10
+                score += len(block) * 2
+                candidates.append((score, rng.random(), d, shift, mentor, block))
         if not candidates:
             return False
-        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-        _, _, shift, block = candidates[0]
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        _, _, _, shift, mentor, block = candidates[0]
         for cur in block:
             mark_assignment(emp, cur, shift)
+            pair_mentor_counts[(emp.key, mentor.key)] += 1
+            pair_mentor_loads[mentor.key] += 1
         return True
 
     for emp in employees:

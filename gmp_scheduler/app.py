@@ -1542,6 +1542,23 @@ class MainWindow(QMainWindow):
         settings_save_row.addWidget(save_settings_btn)
         staffing_layout.addLayout(settings_save_row)
         staffing_layout.addWidget(QLabel("토요일 GY 값은 자동으로 토요일 당직 인원으로 적용됩니다."))
+        fairness_label = QLabel(
+            "자동생성 공정 배정 기준\n"
+            "1. 날짜 유형별 최소 인원표에 맞춰 Day, SW, GY/당직을 먼저 채웁니다.\n"
+            "2. 근무불가일, Day만 가능, 연속근무/연속 GY 제한에 걸리는 사람은 뒤로 밀리거나 제외됩니다.\n"
+            "3. 해당 주 근무가 2회 미만인 사람을 강하게 우선하고, 이미 근무가 많거나 같은 근무가 많은 사람은 뒤로 보냅니다.\n"
+            "4. 주말/공휴일과 긴 연휴 중간 근무가 한 사람에게 몰리지 않도록 이전 배정 횟수를 점수에 반영합니다.\n"
+            "5. GY/당직은 다음 휴무가 같은 모듈 인원끼리 겹치지 않도록 벌점을 줍니다.\n"
+            "6. 모듈 가중치는 선택한 근무 유형에서 해당 모듈 인원이 조금 더 뽑히도록 점수를 보정합니다.\n"
+            "7. 페어근무자는 일반 근무자와 같은 날짜/같은 근무에 붙되, 자동생성에서는 한 근무에 총 2명을 넘지 않게 배정하고 같은 멘토 반복을 줄입니다.\n"
+            "8. 표시근무 고정 생성은 사용자가 미리 찍은 근무를 먼저 카운트한 뒤 부족한 자리만 자동으로 채웁니다."
+        )
+        fairness_label.setWordWrap(True)
+        fairness_label.setStyleSheet(
+            "background: #f7f9fb; border: 1px solid #d6dee8; border-radius: 6px; "
+            "padding: 8px; color: #1f2933;"
+        )
+        staffing_layout.addWidget(fairness_label)
 
         rule_group = QGroupBox("제약")
         rule_form = QFormLayout(rule_group)
@@ -1991,7 +2008,7 @@ class MainWindow(QMainWindow):
             previous = self.load_existing_schedule_for_source(seed_year, seed_month, seed_source)
             if previous and previous.employees:
                 return [
-                    Employee(emp.name, emp.employee_id, emp.is_new, set(), emp.module, emp.day_only)
+                    Employee(emp.name, emp.employee_id, emp.is_new, set(), emp.module, emp.day_only, emp.pair_required)
                     for emp in previous.employees
                 ]
         return []
@@ -2182,7 +2199,7 @@ class MainWindow(QMainWindow):
             return
         unavailable_by_key = {emp.key: set(emp.unavailable_dates) for emp in current.employees}
         employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, unavailable_by_key.get(emp.key, set()), emp.module, emp.day_only)
+            Employee(emp.name, emp.employee_id, emp.is_new, unavailable_by_key.get(emp.key, set()), emp.module, emp.day_only, emp.pair_required)
             for emp in seeded
         ]
         dates = month_dates(year, month)
