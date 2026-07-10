@@ -15,16 +15,16 @@ from .models import ShiftRules
 
 SHIFT_FILLS = {
     SHIFT_DAY: "FFF2CC",
-    SHIFT_SWING: "D9EAD3",
+    SHIFT_SWING: "C6E0B4",
     SHIFT_GY: "D9E2F3",
-    SHIFT_DUTY: "FCE4D6",
+    SHIFT_DUTY: "F4B183",
     SHIFT_GY_REST: "E7E6E6",
     OFF: "FFFFFF",
     "": "FFFFFF",
 }
 UNAVAILABLE_FILL = "E7E6E6"
-FAMILY_FILL = "D9EAD3"
-HOLIDAY_FILL = "FCE4D6"
+FAMILY_FILL = "D9EAF7"
+HOLIDAY_FILL = "FDE9D9"
 
 
 def parse_date(value, default_year: Optional[int] = None, default_month: Optional[int] = None) -> Optional[date]:

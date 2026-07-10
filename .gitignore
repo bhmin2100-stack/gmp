@@ -15,8 +15,11 @@ dist/
 *.spec
 *.xlsx
 !examples/*.xlsx
+*.sqlite3
+gmp_scheduler/build_info.py
 module_settings.json
 rule_settings.json
+team_split_settings.json
 
 # OS / IDE
 .DS_Store

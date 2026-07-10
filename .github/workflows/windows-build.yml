@@ -27,9 +27,42 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Stamp build metadata
+        shell: pwsh
+        run: |
+          $version = python -c "import gmp_scheduler; print(gmp_scheduler.__version__)"
+          $buildDate = (Get-Date).ToUniversalTime().ToString("o")
+          "GMP_VERSION=$version" >> $env:GITHUB_ENV
+          "GMP_BUILD_DATE=$buildDate" >> $env:GITHUB_ENV
+          @"
+          from __future__ import annotations
+
+          APP_VERSION = "$version"
+          BUILD_COMMIT = "${{ github.sha }}"
+          BUILD_ID = "${{ github.run_id }}-${{ github.run_attempt }}"
+          BUILD_DATE = "$buildDate"
+          "@ | Set-Content -Path gmp_scheduler\build_info.py -Encoding UTF8
+
       - name: Build EXE
         run: |
           pyinstaller --noconsole --onefile --name "GMP-Scheduler" main.py
+
+      - name: Write release metadata
+        shell: pwsh
+        run: |
+          $exe = "dist\GMP-Scheduler.exe"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item $exe).Length
+          $metadata = [ordered]@{
+            version = $env:GMP_VERSION
+            build_id = "${{ github.run_id }}-${{ github.run_attempt }}"
+            commit = "${{ github.sha }}"
+            build_date = $env:GMP_BUILD_DATE
+            exe_asset = "GMP-Scheduler.exe"
+            sha256 = $hash
+            size = $size
+          }
+          $metadata | ConvertTo-Json | Set-Content -Path "dist\version.json" -Encoding UTF8
 
       - name: Publish EXE to release
         uses: softprops/action-gh-release@v2
@@ -39,7 +72,9 @@ jobs:
           body: |
             Windows executable build for GMP shift scheduler.
             Download GMP-Scheduler.exe and run it directly on Windows.
-          files: dist/GMP-Scheduler.exe
+          files: |
+            dist/GMP-Scheduler.exe
+            dist/version.json
           prerelease: true
           make_latest: true
           overwrite_files: true

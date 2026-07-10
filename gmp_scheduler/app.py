@@ -8,7 +8,7 @@ from html import escape
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QDate, QEvent, QMimeData, QTimer, Qt
+from PySide6.QtCore import QDate, QEvent, QMimeData, QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -54,22 +55,24 @@ from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
 from .stats_exclusions import exclude_person, excluded_people, include_person
+from . import updater
 from .validation import validate_schedule
 
 SHIFT_OPTIONS = ["", SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY, SHIFT_GY_REST]
 SHIFT_COLORS = {
     SHIFT_DAY: QColor("#fff2cc"),
-    SHIFT_SWING: QColor("#d9ead3"),
+    SHIFT_SWING: QColor("#c6e0b4"),
     SHIFT_GY: QColor("#d9e2f3"),
-    SHIFT_DUTY: QColor("#fce4d6"),
+    SHIFT_DUTY: QColor("#f4b183"),
     SHIFT_GY_REST: QColor("#e7e6e6"),
     OFF: QColor("#ffffff"),
     "": QColor("#ffffff"),
 }
 WARNING_COLOR = QColor("#f4cccc")
 UNAVAILABLE_COLOR = QColor("#e7e6e6")
-HOLIDAY_HEADER_COLOR = QColor("#fce4d6")
-FAMILY_HEADER_COLOR = QColor("#d9ead3")
+HOLIDAY_HEADER_COLOR = QColor("#fde9d9")
+FAMILY_HEADER_COLOR = QColor("#d9eaf7")
+DAY_ONLY_COLOR = QColor("#fff4b8")
 STAFFING_OK_COLOR = QColor("#008000")
 OVERVIEW_START_YEAR = 2025
 NAME_COL_WIDTH = 70
@@ -92,6 +95,36 @@ RULE_SETTING_OPTIONS = (
 LEGACY_LABEL = "기존"
 LOCKED_SPLIT_COLOR = QColor("#f3f3f3")
 TEAM_SPLIT_START_DATE = date(2026, 8, 1)
+
+
+class UpdateCheckWorker(QObject):
+    finished = Signal(object, object, bool)
+
+    def __init__(self, manual: bool) -> None:
+        super().__init__()
+        self.manual = manual
+
+    def run(self) -> None:
+        try:
+            self.finished.emit(updater.fetch_update_info(), None, self.manual)
+        except Exception as exc:
+            self.finished.emit(None, exc, self.manual)
+
+
+class UpdateDownloadWorker(QObject):
+    progress = Signal(int, int)
+    finished = Signal(object, object)
+
+    def __init__(self, info: updater.UpdateInfo) -> None:
+        super().__init__()
+        self.info = info
+
+    def run(self) -> None:
+        try:
+            path = updater.download_update(self.info, progress=lambda done, total: self.progress.emit(done, total))
+            self.finished.emit(path, None)
+        except Exception as exc:
+            self.finished.emit(None, exc)
 
 
 class PasteTableWidget(QTableWidget):
@@ -234,6 +267,11 @@ class MainWindow(QMainWindow):
         self._schedule_header_menu_connected = False
         self.month_split_page_index = 0
         self._preserve_roster_page_on_load = False
+        self._update_check_thread: Optional[QThread] = None
+        self._update_check_worker: Optional[UpdateCheckWorker] = None
+        self._update_download_thread: Optional[QThread] = None
+        self._update_download_worker: Optional[UpdateDownloadWorker] = None
+        self._update_progress_dialog: Optional[QProgressDialog] = None
 
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2100)
@@ -253,8 +291,8 @@ class MainWindow(QMainWindow):
 
         self._build_rule_widgets()
 
-        self.employee_table = ScheduleInputTable(self, 0, 5)
-        self.employee_table.setHorizontalHeaderLabels(["성명", "사번", "신규", "불가일(YYYY-MM-DD, ...)", "모듈"])
+        self.employee_table = ScheduleInputTable(self, 0, 6)
+        self.employee_table.setHorizontalHeaderLabels(["성명", "사번", "신규", "불가일(YYYY-MM-DD, ...)", "모듈", "Day만"])
         self.employee_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.employee_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.employee_table.customContextMenuRequested.connect(self.show_employee_module_menu)
@@ -284,6 +322,10 @@ class MainWindow(QMainWindow):
         self.create_schedule_btn.setStyleSheet("font-weight: 700; padding: 8px;")
         self.create_schedule_btn.clicked.connect(self.create_missing_schedule_for_current_page)
         self.create_schedule_btn.hide()
+        self.fixed_generate_schedule_btn = QPushButton("표시근무 고정 생성")
+        self.fixed_generate_schedule_btn.setStyleSheet("font-weight: 700; padding: 8px;")
+        self.fixed_generate_schedule_btn.clicked.connect(self.generate_fixed_schedule_for_current_page)
+        self.fixed_generate_schedule_btn.hide()
         self.regenerate_schedule_btn = QPushButton("근무표 재생성")
         self.regenerate_schedule_btn.setStyleSheet("font-weight: 700; padding: 8px;")
         self.regenerate_schedule_btn.clicked.connect(self.regenerate_schedule_for_current_page)
@@ -357,6 +399,7 @@ class MainWindow(QMainWindow):
             app.installEventFilter(self)
         self.load_selected_month_from_db(refresh_overview=False)
         self.mark_year_overview_dirty()
+        QTimer.singleShot(1500, self.check_updates_on_startup)
 
     @staticmethod
     def legacy_source_name(year: int, month: int) -> str:
@@ -518,7 +561,7 @@ class MainWindow(QMainWindow):
         if self.result:
             module_by_key = {emp.key: emp.module for emp in self.employees}
             self.result.employees = [
-                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_by_key.get(emp.key, emp.module))
+                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_by_key.get(emp.key, emp.module), emp.day_only)
                 for emp in self.result.employees
             ]
         self.statusBar().showMessage(f"{len(rows)}명 모듈 설정 완료", 4000)
@@ -541,16 +584,16 @@ class MainWindow(QMainWindow):
             if f"{name}|{employee_no}" in keys:
                 self.employee_table.setItem(row, 4, QTableWidgetItem(module_name))
         self.employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module)
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only)
             for emp in self.collect_employees()
         ]
         result.employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module)
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only)
             for emp in result.employees
         ]
         if self.result and result.year == self.result.year and result.month == self.result.month:
             self.result.employees = [
-                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module)
+                Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), module_name if emp.key in keys else emp.module, emp.day_only)
                 for emp in self.result.employees
             ]
         self.save_result_silently(result)
@@ -566,6 +609,36 @@ class MainWindow(QMainWindow):
                 changed = True
         if changed:
             self.employees = self.collect_employees()
+
+    def module_members(self, module_name: str) -> List[Employee]:
+        employees = self.collect_employees()
+        if not employees and self.result:
+            employees = list(self.result.employees)
+        return [emp for emp in employees if emp.module == module_name]
+
+    def show_module_members_for_item(self, item) -> None:
+        module_name = item.text().strip() if item else ""
+        if not module_name:
+            return
+        members = self.module_members(module_name)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{module_name} 인원")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"{module_name} · {len(members)}명"))
+        member_list = QListWidget()
+        for emp in members:
+            label = emp.name if not emp.employee_id else f"{emp.name} / {emp.employee_id}"
+            if emp.day_only:
+                label += " · Day만"
+            member_list.addItem(label)
+        if not members:
+            member_list.addItem("해당 모듈 인원이 없습니다.")
+        layout.addWidget(member_list)
+        close_btn = QPushButton("닫기")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        dialog.resize(320, 420)
+        dialog.exec()
 
     def refresh_module_weight_module_combo(self) -> None:
         if not hasattr(self, "module_weight_module_combo"):
@@ -737,7 +810,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def clone_schedule_result(result: ScheduleResult, source_name: Optional[str] = None) -> ScheduleResult:
         employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module)
+            Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module, emp.day_only)
             for emp in result.employees
         ]
         schedule = {
@@ -798,7 +871,7 @@ class MainWindow(QMainWindow):
         employee_by_key = {emp.key: emp for emp in result.employees}
         for emp in legacy.employees:
             if emp.key not in employee_by_key:
-                copied = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module)
+                copied = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates), emp.module, emp.day_only)
                 result.employees.append(copied)
                 employee_by_key[copied.key] = copied
 
@@ -1005,6 +1078,153 @@ class MainWindow(QMainWindow):
         menu.addAction("휴일 제외").triggered.connect(lambda: self.apply_calendar_override(d, "remove_holiday"))
         menu.exec(table.horizontalHeader().mapToGlobal(pos))
 
+    def check_updates_on_startup(self) -> None:
+        self.start_update_check(manual=False)
+
+    def check_updates_manually(self) -> None:
+        self.start_update_check(manual=True)
+
+    def start_update_check(self, *, manual: bool) -> None:
+        if self._update_check_thread is not None:
+            if manual:
+                self.statusBar().showMessage("업데이트 확인이 이미 진행 중입니다.", 3000)
+            return
+        if not manual and not updater.is_packaged_app():
+            return
+        if manual:
+            self.statusBar().showMessage("업데이트 확인 중...", 4000)
+
+        thread = QThread(self)
+        worker = UpdateCheckWorker(manual)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.on_update_check_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda t=thread: self.cleanup_update_check_thread(t))
+        self._update_check_thread = thread
+        self._update_check_worker = worker
+        thread.start()
+
+    def cleanup_update_check_thread(self, thread: QThread) -> None:
+        if self._update_check_thread is thread:
+            self._update_check_thread = None
+            self._update_check_worker = None
+
+    def on_update_check_finished(self, info: object, error: object, manual: bool) -> None:
+        if error:
+            if manual:
+                QMessageBox.warning(self, "업데이트 확인", f"업데이트 확인에 실패했습니다.\n\n{error}")
+            return
+        if not isinstance(info, updater.UpdateInfo):
+            return
+        if not info.is_available:
+            if manual:
+                QMessageBox.information(self, "업데이트 확인", f"현재 최신 버전입니다.\n\n현재: {info.current_label}")
+            return
+        if not updater.is_packaged_app():
+            if manual:
+                QMessageBox.information(
+                    self,
+                    "업데이트 확인",
+                    "새 배포본이 있지만 현재는 개발용 Python 실행 상태라 EXE 교체를 실행하지 않습니다.\n"
+                    "배포된 GMP-Scheduler.exe에서 자동 업데이트가 동작합니다.",
+                )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "업데이트",
+            "새 버전이 있습니다.\n\n"
+            f"현재: {info.current_label}\n"
+            f"최신: {info.latest_label}\n\n"
+            "프로그램을 잠깐 종료하고 업데이트한 뒤 자동으로 다시 실행합니다.\n"
+            "근무표 DB 파일은 변경하지 않습니다.",
+            QMessageBox.Ok | QMessageBox.Cancel,
+            QMessageBox.Ok,
+        )
+        if answer == QMessageBox.Ok:
+            self.start_update_download(info)
+
+    def start_update_download(self, info: updater.UpdateInfo) -> None:
+        if self._update_download_thread is not None:
+            self.statusBar().showMessage("업데이트 다운로드가 이미 진행 중입니다.", 3000)
+            return
+
+        dialog = QProgressDialog("업데이트 파일 다운로드 중...", "", 0, 100, self)
+        dialog.setWindowTitle("업데이트")
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setCancelButton(None)
+        dialog.setValue(0)
+        dialog.show()
+
+        thread = QThread(self)
+        worker = UpdateDownloadWorker(info)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.on_update_download_progress)
+        worker.finished.connect(self.on_update_download_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda t=thread: self.cleanup_update_download_thread(t))
+        self._update_progress_dialog = dialog
+        self._update_download_thread = thread
+        self._update_download_worker = worker
+        thread.start()
+
+    def cleanup_update_download_thread(self, thread: QThread) -> None:
+        if self._update_download_thread is thread:
+            self._update_download_thread = None
+            self._update_download_worker = None
+
+    def on_update_download_progress(self, downloaded: int, total: int) -> None:
+        dialog = self._update_progress_dialog
+        if dialog is None:
+            return
+        if total > 0:
+            percent = max(0, min(100, int(downloaded * 100 / total)))
+            dialog.setRange(0, 100)
+            dialog.setValue(percent)
+            dialog.setLabelText(
+                f"업데이트 파일 다운로드 중... {self.format_bytes(downloaded)} / {self.format_bytes(total)}"
+            )
+        else:
+            dialog.setRange(0, 0)
+            dialog.setLabelText(f"업데이트 파일 다운로드 중... {self.format_bytes(downloaded)}")
+
+    def on_update_download_finished(self, path: object, error: object) -> None:
+        dialog = self._update_progress_dialog
+        self._update_progress_dialog = None
+        if dialog is not None:
+            dialog.close()
+        if error:
+            QMessageBox.warning(self, "업데이트", f"업데이트 다운로드에 실패했습니다.\n\n{error}")
+            return
+        if not isinstance(path, Path):
+            QMessageBox.warning(self, "업데이트", "업데이트 파일 경로를 확인할 수 없습니다.")
+            return
+        try:
+            updater.launch_self_update(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "업데이트", f"업데이트 적용을 시작하지 못했습니다.\n\n{exc}")
+            return
+        app = QApplication.instance()
+        if app:
+            app.quit()
+
+    @staticmethod
+    def format_bytes(value: int) -> str:
+        size = float(max(0, value))
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+            size /= 1024
+        return f"{int(size)} B"
+
     def _build_ui(self) -> None:
         toolbar = QToolBar("main")
         self.addToolBar(toolbar)
@@ -1016,10 +1236,13 @@ class MainWindow(QMainWindow):
         import_db_action.triggered.connect(self.import_database_file)
         export_action = QAction("엑셀 저장", self)
         export_action.triggered.connect(self.export_excel)
+        update_action = QAction("업데이트 확인", self)
+        update_action.triggered.connect(self.check_updates_manually)
         toolbar.addAction(save_db_action)
         toolbar.addAction(export_db_action)
         toolbar.addAction(import_db_action)
         toolbar.addAction(export_action)
+        toolbar.addAction(update_action)
         self.admin_only_actions.extend([save_db_action, export_db_action, import_db_action, export_action])
 
         root = QWidget()
@@ -1076,12 +1299,14 @@ class MainWindow(QMainWindow):
         schedule_layout.addWidget(QLabel("메인 월별 근무표입니다. 엑셀에서 성명/사번/1일~말일 표를 복사한 뒤 이 표 아무 셀에 커서를 두고 Ctrl+V 하세요. 코드: D, S, G/지근, 당직, 지휴, 빈칸"))
         schedule_layout.addWidget(self.seed_employees_btn)
         schedule_layout.addWidget(self.create_schedule_btn)
+        schedule_layout.addWidget(self.fixed_generate_schedule_btn)
         schedule_layout.addWidget(self.regenerate_schedule_btn)
         schedule_layout.addWidget(self.schedule_table)
         schedule_layout.addWidget(self.month_split_scroll)
         if hasattr(self, "admin_only_widgets"):
             self.admin_only_widgets.append(self.seed_employees_btn)
             self.admin_only_widgets.append(self.create_schedule_btn)
+            self.admin_only_widgets.append(self.fixed_generate_schedule_btn)
             self.admin_only_widgets.append(self.regenerate_schedule_btn)
 
         stats_tab = QWidget()
@@ -1152,6 +1377,7 @@ class MainWindow(QMainWindow):
         module_group = QGroupBox("모듈")
         module_layout = QVBoxLayout(module_group)
         self.module_list_widget = QListWidget()
+        self.module_list_widget.itemDoubleClicked.connect(self.show_module_members_for_item)
         self.module_name_edit = QLineEdit()
         self.module_name_edit.setPlaceholderText("모듈 이름")
         module_button_row = QHBoxLayout()
@@ -1249,6 +1475,7 @@ class MainWindow(QMainWindow):
             unavailable = ", ".join(sorted(d.isoformat() for d in emp.unavailable_dates))
             self.employee_table.setItem(row, 3, QTableWidgetItem(unavailable))
             self.employee_table.setItem(row, 4, QTableWidgetItem(emp.module))
+            self.employee_table.setItem(row, 5, QTableWidgetItem("Y" if emp.day_only else ""))
         self.apply_access_mode()
 
     def sync_rules_from_widgets(
@@ -1298,7 +1525,16 @@ class MainWindow(QMainWindow):
             is_new = is_new_text in ("y", "yes", "true", "1", "신규", "ㅇ", "o")
             unavailable = parse_unavailable(self._cell_text(self.employee_table, row, 3), year, month)
             module = self._cell_text(self.employee_table, row, 4)
-            emp = Employee(name=name, employee_id=employee_id, is_new=is_new, unavailable_dates=unavailable, module=module)
+            day_only_text = self._cell_text(self.employee_table, row, 5).lower()
+            day_only = day_only_text in ("y", "yes", "true", "1", "day", "d", "데이", "ㅇ", "o")
+            emp = Employee(
+                name=name,
+                employee_id=employee_id,
+                is_new=is_new,
+                unavailable_dates=unavailable,
+                module=module,
+                day_only=day_only,
+            )
             if emp.key in seen:
                 continue
             seen.add(emp.key)
@@ -1524,20 +1760,27 @@ class MainWindow(QMainWindow):
             self.create_schedule_btn.hide()
             if hasattr(self, "seed_employees_btn"):
                 self.seed_employees_btn.hide()
+            if hasattr(self, "fixed_generate_schedule_btn"):
+                self.fixed_generate_schedule_btn.hide()
             if hasattr(self, "regenerate_schedule_btn"):
                 self.regenerate_schedule_btn.hide()
             return
         target_source = source_name or self.storage_source_name(result)
         should_show = self.should_offer_schedule_generation(result, target_source)
+        should_fixed_generate = self.result_has_work_marks(result)
         should_regenerate = self.result_has_work_marks(result)
         if self.is_team_source(target_source):
             self.create_schedule_btn.setText(f"{target_source} 근무표 생성")
+            if hasattr(self, "fixed_generate_schedule_btn"):
+                self.fixed_generate_schedule_btn.setText(f"{target_source} 표시근무 고정 생성")
             if hasattr(self, "seed_employees_btn"):
                 self.seed_employees_btn.setText(f"{target_source} 인원 반영")
             if hasattr(self, "regenerate_schedule_btn"):
                 self.regenerate_schedule_btn.setText(f"{target_source} 근무표 재생성")
         else:
             self.create_schedule_btn.setText("근무표 생성")
+            if hasattr(self, "fixed_generate_schedule_btn"):
+                self.fixed_generate_schedule_btn.setText("표시근무 고정 생성")
             if hasattr(self, "seed_employees_btn"):
                 self.seed_employees_btn.setText("인원 반영")
             if hasattr(self, "regenerate_schedule_btn"):
@@ -1545,6 +1788,8 @@ class MainWindow(QMainWindow):
         self.create_schedule_btn.setVisible(should_show)
         if hasattr(self, "seed_employees_btn"):
             self.seed_employees_btn.setVisible(should_show)
+        if hasattr(self, "fixed_generate_schedule_btn"):
+            self.fixed_generate_schedule_btn.setVisible(should_fixed_generate)
         if hasattr(self, "regenerate_schedule_btn"):
             self.regenerate_schedule_btn.setVisible(should_regenerate)
 
@@ -1561,12 +1806,12 @@ class MainWindow(QMainWindow):
             previous = self.load_existing_schedule_for_source(seed_year, seed_month, seed_source)
             if previous and previous.employees:
                 return [
-                    Employee(emp.name, emp.employee_id, emp.is_new, set(), emp.module)
+                    Employee(emp.name, emp.employee_id, emp.is_new, set(), emp.module, emp.day_only)
                     for emp in previous.employees
                 ]
         return []
 
-    def generation_rules_message(self, source_name: Optional[str] = None) -> str:
+    def generation_rules_message(self, source_name: Optional[str] = None, *, preserve_manual: bool = False) -> str:
         target_source = source_name or self.current_roster_source_name()
         rules = self.sync_rules_from_widgets(source_name=target_source)
         rule_lines = []
@@ -1582,14 +1827,16 @@ class MainWindow(QMainWindow):
         weight_text = ""
         if weight_lines:
             weight_text = f"- 모듈 가중치:\n{chr(10).join(weight_lines)}\n"
+        fixed_text = "- 현재 표시된 근무는 고정하고, 부족한 근무만 자동 배정합니다.\n" if preserve_manual else ""
         return (
             f"아래 규칙으로 {target_source} 근무표를 자동 생성합니다.\n\n"
             f"{chr(10).join(rule_lines)}\n"
             f"{weight_text}"
+            f"{fixed_text}"
             f"- 최대 연속 근무: {rules.max_consecutive_work_days}일\n"
             f"- 최대 연속 G/당직: {rules.max_consecutive_gy}일\n"
             "- 직원별 불가일은 근무 배정에서 제외합니다.\n"
-            f"- 직원별 근무 가능일을 기준으로 주 {rules.min_weekly_work_days}회 이상 배정을 우선합니다.\n"
+            f"- 주 {rules.min_weekly_work_days}회 미만 배정 직원을 우선합니다.\n"
             "- 전월 말 당직 이월 규칙을 반영합니다.\n\n"
             "확인을 누르면 바로 생성하고 DB에 자동 저장합니다."
         )
@@ -1625,11 +1872,11 @@ class MainWindow(QMainWindow):
             shift_label = shift
         return f"{day_label} {shift_label}"
 
-    def confirm_generation_rules(self, source_name: Optional[str] = None) -> bool:
+    def confirm_generation_rules(self, source_name: Optional[str] = None, *, preserve_manual: bool = False) -> bool:
         answer = QMessageBox.question(
             self,
             "근무표 생성 규칙",
-            self.generation_rules_message(source_name),
+            self.generation_rules_message(source_name, preserve_manual=preserve_manual),
             QMessageBox.Ok | QMessageBox.Cancel,
             QMessageBox.Ok,
         )
@@ -1638,6 +1885,10 @@ class MainWindow(QMainWindow):
     def create_missing_schedule_for_current_page(self) -> None:
         source_name = self.current_roster_source_name()
         self.generate_schedule(source_name=source_name)
+
+    def generate_fixed_schedule_for_current_page(self) -> None:
+        source_name = self.current_roster_source_name()
+        self.generate_schedule(source_name=source_name, preserve_manual=True)
 
     def regenerate_schedule_for_current_page(self) -> None:
         source_name = self.current_roster_source_name()
@@ -1687,6 +1938,14 @@ class MainWindow(QMainWindow):
         )
         return button
 
+    def make_fixed_schedule_generate_button(self, year: int, month: int, source_name: str) -> QPushButton:
+        button = QPushButton("표시근무 고정 생성")
+        button.setFixedWidth(135)
+        button.clicked.connect(
+            lambda _checked=False, y=year, m=month, s=source_name: self.generate_fixed_schedule_for_month_source(y, m, s)
+        )
+        return button
+
     def make_schedule_regenerate_button(self, year: int, month: int, source_name: str) -> QPushButton:
         button = QPushButton("근무표 재생성")
         button.setFixedWidth(115)
@@ -1694,6 +1953,16 @@ class MainWindow(QMainWindow):
             lambda _checked=False, y=year, m=month, s=source_name: self.regenerate_schedule_for_month_source(y, m, s)
         )
         return button
+
+    def generate_fixed_schedule_for_month_source(self, year: int, month: int, source_name: str) -> None:
+        view = source_name if self.is_team_source(source_name) else None
+        self.set_current_month(year, month)
+        self.result = self.load_schedule_for_view(year, month, view)
+        self.apply_previous_month_gy_carryover(self.result)
+        self.apply_split_legacy_prefix(self.result)
+        self.employees = list(self.result.employees)
+        self.add_employee_rows(self.employees)
+        self.generate_schedule(source_name=source_name, preserve_manual=True)
 
     def make_seed_employees_button(self, year: int, month: int, source_name: str) -> QPushButton:
         button = QPushButton("인원 반영")
@@ -1713,7 +1982,7 @@ class MainWindow(QMainWindow):
             return
         unavailable_by_key = {emp.key: set(emp.unavailable_dates) for emp in current.employees}
         employees = [
-            Employee(emp.name, emp.employee_id, emp.is_new, unavailable_by_key.get(emp.key, set()), emp.module)
+            Employee(emp.name, emp.employee_id, emp.is_new, unavailable_by_key.get(emp.key, set()), emp.module, emp.day_only)
             for emp in seeded
         ]
         dates = month_dates(year, month)
@@ -1747,7 +2016,7 @@ class MainWindow(QMainWindow):
         for emp in employees:
             dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
             if dates:
-                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module))
+                updated.append(Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module, emp.day_only))
             else:
                 updated.append(emp)
         return updated
@@ -1838,7 +2107,7 @@ class MainWindow(QMainWindow):
             if self.is_locked_split_cell(result, d):
                 continue
             if d not in emp.unavailable_dates:
-                updated[row] = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | {d}, emp.module)
+                updated[row] = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | {d}, emp.module, emp.day_only)
                 hit += 1
         if hit <= 0:
             return False
@@ -2058,6 +2327,43 @@ class MainWindow(QMainWindow):
             lambda _checked=False, r=rows: self.apply_module_to_schedule_rows(result, r, "")
         )
 
+    def apply_day_only_to_schedule_rows(self, result: ScheduleResult, rows: List[int], enabled: bool) -> None:
+        valid_rows = sorted({row for row in rows if 0 <= row < len(result.employees)})
+        if not valid_rows:
+            return
+        keys = {result.employees[row].key for row in valid_rows}
+        result.employees = [
+            Employee(
+                emp.name,
+                emp.employee_id,
+                emp.is_new,
+                set(emp.unavailable_dates),
+                emp.module,
+                enabled if emp.key in keys else emp.day_only,
+            )
+            for emp in result.employees
+        ]
+        for row in range(self.employee_table.rowCount()):
+            name = self._cell_text(self.employee_table, row, 0)
+            employee_no = self._cell_text(self.employee_table, row, 1)
+            if f"{name}|{employee_no}" in keys:
+                self.employee_table.setItem(row, 5, QTableWidgetItem("Y" if enabled else ""))
+        if (
+            self.result
+            and result.year == self.result.year
+            and result.month == self.result.month
+            and self.storage_source_name(result) == self.storage_source_name(self.result)
+        ):
+            self.result = result
+            self.employees = list(result.employees)
+        self.save_result_silently(result)
+        self.render_schedule_table()
+        self.refresh_validation_and_stats()
+        self.mark_cumulative_stats_dirty()
+        self.mark_year_overview_dirty()
+        label = "Day만 근무가능" if enabled else "Day만 해제"
+        self.statusBar().showMessage(f"{len(keys)}명 {label} 완료", 4000)
+
     def delete_schedule_rows(self, result: ScheduleResult, rows: List[int]) -> None:
         if not self.require_admin("인원 삭제"):
             return
@@ -2127,6 +2433,12 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
         if rows:
             self.add_schedule_module_menu(menu, result, rows)
+            day_only_action = menu.addAction("Day만 근무가능")
+            day_only_action.setCheckable(True)
+            day_only_action.setChecked(all(0 <= row < len(result.employees) and result.employees[row].day_only for row in rows))
+            day_only_action.triggered.connect(
+                lambda checked=False, r=rows: self.apply_day_only_to_schedule_rows(result, r, checked)
+            )
             menu.addSeparator()
             menu.addAction("인원 삭제").triggered.connect(
                 lambda _checked=False, r=rows: self.delete_schedule_rows(result, r)
@@ -2336,7 +2648,7 @@ class MainWindow(QMainWindow):
             dates = unavailable_map.get(emp.key) or unavailable_map.get(emp.employee_id) or unavailable_map.get(emp.name) or set()
             if dates:
                 hit += len(dates)
-                new_emp = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module)
+                new_emp = Employee(emp.name, emp.employee_id, emp.is_new, set(emp.unavailable_dates) | set(dates), emp.module, emp.day_only)
                 updated.append(new_emp)
             else:
                 updated.append(emp)
@@ -2487,13 +2799,14 @@ class MainWindow(QMainWindow):
         *,
         source_name: Optional[str] = None,
         confirm_rules: bool = True,
+        preserve_manual: bool = False,
     ) -> None:
         if hasattr(self, "require_admin") and not self.require_admin("근무표 자동 생성"):
             return
         year = self.year_spin.value()
         month = self.month_spin.value()
         target_source = source_name or self.current_roster_source_name()
-        if confirm_rules and not self.confirm_generation_rules(target_source):
+        if confirm_rules and not self.confirm_generation_rules(target_source, preserve_manual=preserve_manual):
             return
         rules = self.sync_rules_from_widgets(source_name=target_source)
         self.employees = self.collect_employees()
@@ -2514,7 +2827,7 @@ class MainWindow(QMainWindow):
             korean_holidays(year),
             source_name=target_source,
         )
-        initial_schedule = self.previous_month_gy_initial_schedule(initial_result)
+        initial_schedule = self.generation_initial_schedule(initial_result, preserve_manual=preserve_manual)
         try:
             self.result = generate_month_schedule(
                 self.employees,
@@ -2632,6 +2945,11 @@ class MainWindow(QMainWindow):
                 id_item = QTableWidgetItem(emp.employee_id)
                 name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
                 id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+                if emp.day_only:
+                    name_item.setBackground(DAY_ONLY_COLOR)
+                    id_item.setBackground(DAY_ONLY_COLOR)
+                    name_item.setToolTip("Day만 근무가능")
+                    id_item.setToolTip("Day만 근무가능")
                 table.setItem(row, 0, name_item)
                 table.setItem(row, 1, id_item)
                 for col, d in enumerate(dates, start=2):
@@ -2701,6 +3019,7 @@ class MainWindow(QMainWindow):
                 title_row.addWidget(self.make_seed_employees_button(year, month, source_name))
                 title_row.addWidget(self.make_schedule_generate_button(year, month, source_name))
             if self.result_has_work_marks(result):
+                title_row.addWidget(self.make_fixed_schedule_generate_button(year, month, source_name))
                 title_row.addWidget(self.make_schedule_regenerate_button(year, month, source_name))
             if clearable:
                 clear_btn = QPushButton("이 달 초기화")
@@ -2828,6 +3147,11 @@ class MainWindow(QMainWindow):
             id_item = QTableWidgetItem(emp.employee_id)
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
             id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+            if emp.day_only:
+                name_item.setBackground(DAY_ONLY_COLOR)
+                id_item.setBackground(DAY_ONLY_COLOR)
+                name_item.setToolTip("Day만 근무가능")
+                id_item.setToolTip("Day만 근무가능")
             self.schedule_table.setItem(row, 0, name_item)
             self.schedule_table.setItem(row, 1, id_item)
             for col, d in enumerate(dates, start=2):
@@ -3040,6 +3364,30 @@ class MainWindow(QMainWindow):
                 if self.is_locked_split_cell(result, d) or is_duty_day(d):
                     continue
                 initial.setdefault(d, {})[emp.key] = SHIFT_GY
+        return initial
+
+    def generation_initial_schedule(self, result: ScheduleResult, *, preserve_manual: bool) -> ScheduleMap:
+        initial = self.previous_month_gy_initial_schedule(result)
+        if not preserve_manual:
+            return initial
+        current = self.result if (
+            self.result
+            and self.result.year == result.year
+            and self.result.month == result.month
+            and self.storage_source_name(self.result) == self.storage_source_name(result)
+        ) else self.load_existing_schedule_for_source(result.year, result.month, self.storage_source_name(result))
+        if not current:
+            return initial
+        employee_keys = {emp.key for emp in result.employees}
+        for d in month_dates(result.year, result.month):
+            if self.is_locked_split_cell(result, d):
+                continue
+            current_day = current.schedule.get(d, {})
+            for emp_key in employee_keys:
+                shift = current_day.get(emp_key, OFF)
+                if shift in (OFF, SHIFT_GY_REST, ""):
+                    continue
+                initial.setdefault(d, {})[emp_key] = shift
         return initial
 
     def previous_month_last_duty_keys(self, year: int, month: int, source_name: Optional[str] = None) -> set[str]:

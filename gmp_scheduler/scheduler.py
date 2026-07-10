@@ -110,9 +110,9 @@ def generate_month_schedule(
         weekly_count = counts[emp.key][week_bucket(d)]
         weekly_target = weekly_work_target(emp, d)
         if weekly_count < weekly_target:
-            score -= (weekly_target - weekly_count) * 28
+            score -= (weekly_target - weekly_count) * 80
         else:
-            score += (weekly_count - weekly_target + 1) * 14
+            score += (weekly_count - weekly_target + 1) * 40
 
         cw = consecutive_work_before(emp, d)
         cgy = consecutive_gy_before(emp, d)
@@ -159,7 +159,9 @@ def generate_month_schedule(
     def assign_one(d: date, shift: str) -> bool:
         candidates = [
             e for e in employees
-            if schedule[d].get(e.key, OFF) == OFF and d not in e.unavailable_dates
+            if schedule[d].get(e.key, OFF) == OFF
+            and d not in e.unavailable_dates
+            and (not e.day_only or shift == SHIFT_DAY)
         ]
         if not candidates:
             return False
@@ -168,13 +170,12 @@ def generate_month_schedule(
         mark_assignment(chosen, d, shift)
         return True
 
-    def has_gy_coverage(d: date) -> bool:
-        return any(
-            shift in (SHIFT_GY, SHIFT_DUTY)
-            for shift in schedule.get(d, {}).values()
-        )
+    def assigned_count(d: date, shift: str) -> int:
+        return sum(1 for current in schedule.get(d, {}).values() if current == shift)
 
     def can_start_gy_block(emp: Employee, start: date) -> bool:
+        if emp.day_only:
+            return False
         for d in gy_block_dates(start):
             if d in emp.unavailable_dates:
                 return False
@@ -212,16 +213,18 @@ def generate_month_schedule(
 
     for d in dates:
         min_rules = min_rules_for_date(rules, d, holidays)
-        if not is_duty_day(d) and not has_gy_coverage(d):
-            assign_gy_block_start(d)
         day_swing_order = [shift for shift in (SHIFT_DAY, SHIFT_SWING) if shift in min_rules]
         for shift in day_swing_order:
-            for _ in range(min_rules.get(shift, 0)):
+            for _ in range(max(0, min_rules.get(shift, 0) - assigned_count(d, shift))):
                 assign_one(d, shift)
-        if not has_gy_coverage(d):
-            gy_shift = SHIFT_DUTY if is_duty_day(d) else SHIFT_GY
-            for _ in range(min_rules.get(gy_shift, 1)):
-                assign_one(d, gy_shift)
+        gy_shift = SHIFT_DUTY if is_duty_day(d) else SHIFT_GY
+        required_gy = min_rules.get(gy_shift, 1)
+        if not is_duty_day(d):
+            while assigned_count(d, gy_shift) < required_gy:
+                if not assign_gy_block_start(d):
+                    break
+        for _ in range(max(0, required_gy - assigned_count(d, gy_shift))):
+            assign_one(d, gy_shift)
 
     result = ScheduleResult(year=year, month=month, employees=employees, schedule=schedule, holidays=holidays)
     result.warnings = validate_schedule(employees, year, month, schedule, holidays, rules)
