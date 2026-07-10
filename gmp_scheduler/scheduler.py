@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional, Set, Tuple
 
 from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates
+from .holiday_balance import holiday_run_positions
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .pairing import PAIR_CATEGORY_ORDER, pair_category, pair_coverage
 from .rule_utils import day_shift_key_for_date, min_rules_for_date
@@ -32,9 +33,11 @@ def generate_month_schedule(
     rng = random.Random(seed)
     dates = month_dates(year, month)
     holidays = korean_holidays(year)
+    holiday_positions = holiday_run_positions(dates, holidays)
     schedule: ScheduleMap = {d: {e.key: OFF for e in employees} for d in dates}
     employee_by_key = {e.key: e for e in employees}
     counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    projected_rest_by_module: Dict[tuple[str, date], int] = defaultdict(int)
     previous_day_duty_employee_keys = previous_day_duty_employee_keys or set()
     week_dates: Dict[date, List[date]] = defaultdict(list)
     for d in dates:
@@ -105,10 +108,20 @@ def generate_month_schedule(
         b = bucket(d, shift)
         weight_percent = module_weight_percent(emp, d, shift)
         score = 0.0
-        score += weighted_count(counts[emp.key][b], weight_percent) * 16
-        score += weighted_count(counts[emp.key][shift], weight_percent) * 4
-        score += counts[emp.key]["total"] * 1.2
+        score += weighted_count(counts[emp.key][b], weight_percent) * 18
+        score += weighted_count(counts[emp.key][shift], weight_percent) * 5
+        score += counts[emp.key]["total"] * 3.5
+        score += counts[emp.key]["holiday_work"] * 10
         score -= weight_percent * 0.16
+        holiday_position = holiday_positions.get(d)
+        if holiday_position == "middle":
+            score += counts[emp.key]["long_holiday_middle"] * 220
+            score += counts[emp.key][f"long_holiday_middle_{shift}"] * 90
+        elif holiday_position == "edge":
+            score += counts[emp.key]["long_holiday_edge"] * 35
+            score += counts[emp.key][f"long_holiday_edge_{shift}"] * 20
+        if shift in (SHIFT_GY, SHIFT_DUTY):
+            score += projected_module_rest_conflicts(emp, d, shift) * 120
         weekly_count = counts[emp.key][week_bucket(d)]
         weekly_target = weekly_work_target(emp, d)
         if weekly_count < weekly_target:
@@ -144,6 +157,10 @@ def generate_month_schedule(
         counts[emp.key]["total"] += 1
         if is_holiday_or_weekend(d, holidays):
             counts[emp.key]["holiday_work"] += 1
+        holiday_position = holiday_positions.get(d)
+        if holiday_position:
+            counts[emp.key][f"long_holiday_{holiday_position}"] += 1
+            counts[emp.key][f"long_holiday_{holiday_position}_{shift}"] += 1
 
     if initial_schedule:
         for d, day_map in initial_schedule.items():
@@ -170,6 +187,7 @@ def generate_month_schedule(
         candidates.sort(key=lambda e: candidate_score(e, d, shift))
         chosen = candidates[0]
         mark_assignment(chosen, d, shift)
+        mark_projected_rest(chosen, d, shift)
         return True
 
     def assigned_count(d: date, shift: str) -> int:
@@ -200,6 +218,52 @@ def generate_month_schedule(
             result.append(d)
         return result
 
+    def projected_rest_dates(start: date, shift: str) -> List[date]:
+        if shift == SHIFT_DUTY:
+            rest_date = start + timedelta(days=1)
+            return [rest_date] if rest_date in schedule else []
+        if shift != SHIFT_GY:
+            return []
+        block = gy_block_dates(start)
+        if not block:
+            return []
+        rest_date = block[-1] + timedelta(days=1)
+        return [rest_date] if rest_date in schedule else []
+
+    def projected_module_rest_conflicts(emp: Employee, start: date, shift: str) -> int:
+        if not emp.module:
+            return 0
+        conflicts = 0
+        for rest_date in projected_rest_dates(start, shift):
+            conflicts += projected_rest_by_module[(emp.module, rest_date)]
+            conflicts += sum(
+                1
+                for other in employees
+                if other.key != emp.key
+                and other.module == emp.module
+                and schedule.get(rest_date, {}).get(other.key, OFF) == SHIFT_GY_REST
+            )
+        return conflicts
+
+    def mark_projected_rest(emp: Employee, start: date, shift: str) -> None:
+        if not emp.module:
+            return
+        for rest_date in projected_rest_dates(start, shift):
+            projected_rest_by_module[(emp.module, rest_date)] += 1
+
+    def mark_initial_projected_rests() -> None:
+        for emp in employees:
+            if not emp.module:
+                continue
+            for d in dates:
+                shift = schedule.get(d, {}).get(emp.key, OFF)
+                if shift == SHIFT_DUTY:
+                    mark_projected_rest(emp, d, SHIFT_DUTY)
+                elif shift == SHIFT_GY and schedule.get(d - timedelta(days=1), {}).get(emp.key, OFF) != SHIFT_GY:
+                    mark_projected_rest(emp, d, SHIFT_GY)
+
+    mark_initial_projected_rests()
+
     def assign_gy_block_start(d: date) -> bool:
         blocked_keys = {
             emp.key
@@ -211,10 +275,11 @@ def generate_month_schedule(
         candidates = [e for e in employees if e.key not in blocked_keys and can_start_gy_block(e, d)]
         if not candidates:
             return False
-        candidates.sort(key=lambda e: candidate_score(e, d, SHIFT_GY))
+        candidates.sort(key=lambda e: sum(candidate_score(e, cur, SHIFT_GY)[0] for cur in gy_block_dates(d)) + rng.random())
         chosen = candidates[0]
         for cur in gy_block_dates(d):
             mark_assignment(chosen, cur, SHIFT_GY)
+        mark_projected_rest(chosen, d, SHIFT_GY)
         return True
 
     for d in dates:

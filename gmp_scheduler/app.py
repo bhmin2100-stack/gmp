@@ -68,21 +68,26 @@ SHIFT_COLORS = {
     OFF: QColor("#ffffff"),
     "": QColor("#ffffff"),
 }
-WARNING_COLOR = QColor("#f4cccc")
+WARNING_COLOR = QColor("#fde2e2")
 UNAVAILABLE_COLOR = QColor("#e7e6e6")
-HOLIDAY_HEADER_COLOR = QColor("#fde9d9")
-FAMILY_HEADER_COLOR = QColor("#d9eaf7")
-DAY_ONLY_COLOR = QColor("#fff4b8")
-PAIR_REQUIRED_COLOR = QColor("#f8d7e8")
-STAFFING_OK_COLOR = QColor("#008000")
+HOLIDAY_HEADER_COLOR = QColor("#fff0e6")
+FAMILY_HEADER_COLOR = QColor("#e8f3fb")
+DAY_ONLY_COLOR = QColor("#fff8cc")
+PAIR_REQUIRED_COLOR = QColor("#fbe6f1")
+STAFFING_OK_COLOR = QColor("#4b8a3f")
 OVERVIEW_START_YEAR = 2025
-NAME_COL_WIDTH = 70
+NAME_COL_WIDTH = 96
 ID_COL_WIDTH = 54
 DAY_COL_WIDTH = 32
 COMPACT_ROW_HEIGHT = 18
 COMPACT_FONT_SIZE = 8
 HEADER_FONT_SIZE = 9
 ROSTER_HEADER_HEIGHT = 34
+STATS_NAME_COL_WIDTH = 128
+STATS_ID_COL_WIDTH = 64
+STATS_MONTH_COL_WIDTH = 58
+STATS_METRIC_COL_WIDTH = 68
+STATS_ROW_HEIGHT = 24
 VIEW_LEGACY = "legacy"
 VIEW_V11 = "V11"
 VIEW_V12 = "V12"
@@ -719,6 +724,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "모듈 선택 필요", "가중치를 적용할 모듈을 먼저 선택하세요.")
             return
         self.sync_module_weight_widgets(save=True)
+        self.mark_settings_saved()
         self.statusBar().showMessage("모듈 근무 가중치를 저장했습니다.", 4000)
 
     def clear_module_weight_from_widgets(self) -> None:
@@ -729,6 +735,7 @@ class MainWindow(QMainWindow):
         self.team_rules[source].module_weights.pop(module_name, None)
         save_team_rules(self.team_rules)
         self.populate_module_weight_widgets()
+        self.mark_settings_saved()
         self.statusBar().showMessage("모듈 근무 가중치를 삭제했습니다.", 4000)
 
     def remove_module_weight_settings(self, module_name: str) -> None:
@@ -1017,6 +1024,25 @@ class MainWindow(QMainWindow):
         self.sync_rules_from_widgets(source_name=self.rule_settings_source, widget_source=self.rule_settings_source, save=False)
         self.rule_settings_source = self.active_rule_settings_source()
         self.populate_rule_widgets(self.rule_settings_source)
+        self.mark_settings_saved("표시 중인 설정값을 불러왔습니다.")
+        self.refresh_validation_and_stats()
+
+    def mark_settings_dirty(self) -> None:
+        if hasattr(self, "settings_status_label"):
+            self.settings_status_label.setText("저장 필요")
+            self.settings_status_label.setStyleSheet("color: #9a5a00; font-weight: 700;")
+
+    def mark_settings_saved(self, message: str = "저장됨 - 다음 근무표 생성부터 적용됩니다.") -> None:
+        if hasattr(self, "settings_status_label"):
+            self.settings_status_label.setText(message)
+            self.settings_status_label.setStyleSheet("color: #3f7f45; font-weight: 700;")
+
+    def save_all_settings_from_widgets(self) -> None:
+        source = self.active_rule_settings_source()
+        self.sync_rules_from_widgets(source_name=source, widget_source=source, save=True)
+        self.sync_module_weight_widgets(save=True)
+        self.mark_settings_saved()
+        self.statusBar().showMessage("설정을 저장했습니다. 다음 근무표 생성부터 적용됩니다.", 4000)
         self.refresh_validation_and_stats()
 
     def selected_calendar_date(self) -> date:
@@ -1228,6 +1254,52 @@ class MainWindow(QMainWindow):
             size /= 1024
         return f"{int(size)} B"
 
+    @staticmethod
+    def module_color(module_name: str) -> QColor:
+        palette = [
+            "#eef6e8",
+            "#e9f3fb",
+            "#f7edf9",
+            "#fff3df",
+            "#edf7f4",
+            "#f8eeee",
+            "#eef0fb",
+            "#f4f5e8",
+        ]
+        if not module_name:
+            return QColor("#ffffff")
+        index = sum(ord(ch) for ch in module_name) % len(palette)
+        return QColor(palette[index])
+
+    @staticmethod
+    def employee_display_name(emp: Employee) -> str:
+        if emp.module:
+            return f"{emp.name} [{emp.module}]"
+        return emp.name
+
+    def apply_employee_identity_style(self, name_item: QTableWidgetItem, id_item: QTableWidgetItem, emp: Employee) -> None:
+        markers = []
+        if emp.module:
+            markers.append(f"모듈: {emp.module}")
+        if emp.day_only:
+            markers.append("Day만 근무가능")
+        if emp.pair_required:
+            markers.append("페어근무자")
+        if emp.pair_required:
+            color = PAIR_REQUIRED_COLOR
+        elif emp.day_only:
+            color = DAY_ONLY_COLOR
+        elif emp.module:
+            color = self.module_color(emp.module)
+        else:
+            color = QColor("#ffffff")
+        name_item.setBackground(color)
+        id_item.setBackground(color)
+        if markers:
+            tooltip = "\n".join(markers)
+            name_item.setToolTip(tooltip)
+            id_item.setToolTip(tooltip)
+
     def _build_ui(self) -> None:
         toolbar = QToolBar("main")
         self.addToolBar(toolbar)
@@ -1370,6 +1442,15 @@ class MainWindow(QMainWindow):
         self.day_type_rule_table.verticalHeader().setDefaultSectionSize(34)
         self.day_type_rule_table.setFixedHeight(220)
         staffing_layout.addWidget(self.day_type_rule_table)
+        settings_save_row = QHBoxLayout()
+        self.settings_status_label = QLabel("저장됨 - 다음 근무표 생성부터 적용됩니다.")
+        self.settings_status_label.setStyleSheet("color: #3f7f45; font-weight: 700;")
+        save_settings_btn = QPushButton("설정 저장")
+        save_settings_btn.clicked.connect(self.save_all_settings_from_widgets)
+        settings_save_row.addWidget(self.settings_status_label)
+        settings_save_row.addStretch(1)
+        settings_save_row.addWidget(save_settings_btn)
+        staffing_layout.addLayout(settings_save_row)
         staffing_layout.addWidget(QLabel("토요일 GY 값은 자동으로 토요일 당직 인원으로 적용됩니다."))
 
         rule_group = QGroupBox("제약")
@@ -1443,6 +1524,13 @@ class MainWindow(QMainWindow):
         module_weight_button_row.addWidget(save_module_weight_btn)
         module_weight_layout.addLayout(module_weight_button_row)
         self.refresh_module_weight_module_combo()
+        for widget in self.day_type_rule_spins.values():
+            widget.valueChanged.connect(lambda _value: self.mark_settings_dirty())
+        self.max_consecutive_spin.valueChanged.connect(lambda _value: self.mark_settings_dirty())
+        self.max_consecutive_gy_spin.valueChanged.connect(lambda _value: self.mark_settings_dirty())
+        self.module_weight_percent_spin.valueChanged.connect(lambda _value: self.mark_settings_dirty())
+        for checkbox in self.module_weight_checks.values():
+            checkbox.stateChanged.connect(lambda _state: self.mark_settings_dirty())
 
         side_settings = QVBoxLayout()
         side_settings.addWidget(rule_group)
@@ -2974,6 +3062,27 @@ class MainWindow(QMainWindow):
 
         table.setFixedSize(table_width, table_height)
 
+    def configure_stats_table_layout(self, table: QTableWidget, *, month_matrix: bool = False) -> None:
+        table.setWordWrap(False)
+        table.setAlternatingRowColors(False)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(STATS_ROW_HEIGHT)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Fixed)
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(36)
+        if table.columnCount() <= 0:
+            return
+        table.setColumnWidth(0, STATS_NAME_COL_WIDTH)
+        if month_matrix:
+            for col in range(1, table.columnCount()):
+                table.setColumnWidth(col, STATS_MONTH_COL_WIDTH)
+            return
+        if table.columnCount() > 1:
+            table.setColumnWidth(1, STATS_ID_COL_WIDTH)
+        for col in range(2, table.columnCount()):
+            table.setColumnWidth(col, STATS_METRIC_COL_WIDTH)
+
     def _make_schedule_view_table(self, result: ScheduleResult) -> QTableWidget:
         dates = month_dates(result.year, result.month)
         row_count = max(1, len(result.employees))
@@ -3010,25 +3119,11 @@ class MainWindow(QMainWindow):
                 table.setItem(0, col, QTableWidgetItem(""))
         else:
             for row, emp in enumerate(result.employees):
-                name_item = QTableWidgetItem(emp.name)
+                name_item = QTableWidgetItem(self.employee_display_name(emp))
                 id_item = QTableWidgetItem(emp.employee_id)
                 name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
                 id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
-                markers = []
-                if emp.day_only:
-                    markers.append("Day만 근무가능")
-                if emp.pair_required:
-                    markers.append("페어근무자")
-                if emp.pair_required:
-                    name_item.setBackground(PAIR_REQUIRED_COLOR)
-                    id_item.setBackground(PAIR_REQUIRED_COLOR)
-                elif emp.day_only:
-                    name_item.setBackground(DAY_ONLY_COLOR)
-                    id_item.setBackground(DAY_ONLY_COLOR)
-                if markers:
-                    tooltip = "\n".join(markers)
-                    name_item.setToolTip(tooltip)
-                    id_item.setToolTip(tooltip)
+                self.apply_employee_identity_style(name_item, id_item, emp)
                 table.setItem(row, 0, name_item)
                 table.setItem(row, 1, id_item)
                 for col, d in enumerate(dates, start=2):
@@ -3222,25 +3317,11 @@ class MainWindow(QMainWindow):
                     item.setToolTip("2026-08 전 기존 근무표입니다.")
             self.apply_staffing_header_style(self.schedule_table, self.result, col, d)
         for row, emp in enumerate(self.result.employees):
-            name_item = QTableWidgetItem(emp.name)
+            name_item = QTableWidgetItem(self.employee_display_name(emp))
             id_item = QTableWidgetItem(emp.employee_id)
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
             id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
-            markers = []
-            if emp.day_only:
-                markers.append("Day만 근무가능")
-            if emp.pair_required:
-                markers.append("페어근무자")
-            if emp.pair_required:
-                name_item.setBackground(PAIR_REQUIRED_COLOR)
-                id_item.setBackground(PAIR_REQUIRED_COLOR)
-            elif emp.day_only:
-                name_item.setBackground(DAY_ONLY_COLOR)
-                id_item.setBackground(DAY_ONLY_COLOR)
-            if markers:
-                tooltip = "\n".join(markers)
-                name_item.setToolTip(tooltip)
-                id_item.setToolTip(tooltip)
+            self.apply_employee_identity_style(name_item, id_item, emp)
             self.schedule_table.setItem(row, 0, name_item)
             self.schedule_table.setItem(row, 1, id_item)
             for col, d in enumerate(dates, start=2):
@@ -3619,8 +3700,7 @@ class MainWindow(QMainWindow):
                 if col == len(headers) - 1 and isinstance(value, (int, float)) and abs(value) >= 2:
                     item.setBackground(WARNING_COLOR)
                 table.setItem(row, col, item)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.verticalHeader().setVisible(False)
+        self.configure_stats_table_layout(table)
 
     def render_cumulative_stats(self) -> None:
         self._cumulative_stats_dirty = False
@@ -3632,9 +3712,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "기간 오류", "통계 시작 월이 종료 월보다 늦습니다.")
             return
         self.render_monthly_filter_stats(start_year, start_month, end_year, end_month)
-        self.cumulative_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.cumulative_stats_table.verticalHeader().setVisible(False)
-        self.cumulative_stats_table.verticalHeader().setDefaultSectionSize(34)
+        self.configure_stats_table_layout(self.cumulative_stats_table, month_matrix=True)
 
     @staticmethod
     def iter_month_values(start_year: int, start_month: int, end_year: int, end_month: int) -> List[tuple[int, int]]:
@@ -3829,6 +3907,7 @@ class MainWindow(QMainWindow):
         for r, row in enumerate(month_rows):
             for c, key in enumerate(keys):
                 self.cumulative_stats_table.setItem(r, c, QTableWidgetItem(str(row.get(key, ""))))
+        self.configure_stats_table_layout(self.cumulative_stats_table)
 
     def render_period_shift_stats(self, start_year: int, start_month: int, end_year: int, end_month: int) -> None:
         rows = self.filter_period_rows_for_split(period_assignment_rows(start_year, start_month, end_year, end_month))
@@ -3982,6 +4061,7 @@ class MainWindow(QMainWindow):
                     if current is not None:
                         item.setBackground(self._relative_gradient_color(current, values_for_color))
                 self.cumulative_stats_table.setItem(r, c, item)
+        self.configure_stats_table_layout(self.cumulative_stats_table)
 
     def filter_period_rows_for_split(self, rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
         split = self.enabled_split_date()
@@ -4091,10 +4171,10 @@ class MainWindow(QMainWindow):
         else:
             ratio = min(1.0, max(0.0, (value - low) / (high - low)))
         stops = [
-            (0.0, (74, 144, 226)),
-            (0.33, (80, 200, 120)),
-            (0.66, (255, 224, 102)),
-            (1.0, (244, 76, 76)),
+            (0.0, (235, 244, 255)),
+            (0.33, (232, 247, 238)),
+            (0.66, (255, 248, 218)),
+            (1.0, (255, 229, 229)),
         ]
         left = stops[0]
         right = stops[-1]
