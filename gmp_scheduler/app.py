@@ -3528,10 +3528,10 @@ class MainWindow(QMainWindow):
         *,
         include_validation: bool = False,
     ) -> QColor:
+        if d in emp.unavailable_dates or shift == SHIFT_GY_REST:
+            return UNAVAILABLE_COLOR
         if shift not in (OFF, ""):
             return SHIFT_COLORS.get(shift, QColor("#ffffff"))
-        if d in emp.unavailable_dates:
-            return UNAVAILABLE_COLOR
         if self.is_locked_split_cell(result, d) and shift == OFF:
             return LOCKED_SPLIT_COLOR
         if is_family_day(d):
