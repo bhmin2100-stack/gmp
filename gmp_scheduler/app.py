@@ -78,6 +78,7 @@ DAY_COL_WIDTH = 32
 COMPACT_ROW_HEIGHT = 18
 COMPACT_FONT_SIZE = 8
 HEADER_FONT_SIZE = 9
+ROSTER_HEADER_HEIGHT = 34
 VIEW_LEGACY = "legacy"
 VIEW_V11 = "V11"
 VIEW_V12 = "V12"
@@ -268,8 +269,8 @@ class MainWindow(QMainWindow):
         self.schedule_table.cellChanged.connect(self.on_schedule_cell_changed)
         self.month_split_scroll = QScrollArea()
         self.month_split_scroll.setWidgetResizable(True)
-        self.month_split_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.month_split_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.month_split_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.month_split_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.month_split_content = QWidget()
         self.month_split_layout = QVBoxLayout(self.month_split_content)
         self.month_split_scroll.setWidget(self.month_split_content)
@@ -1030,6 +1031,8 @@ class MainWindow(QMainWindow):
         year_layout.addWidget(QLabel("선택한 연도/월의 근무표입니다. PageUp/PageDown, 좌우 화살표, 또는 상단 연도/월 변경으로 다른 월을 봅니다. 표를 클릭하고 Ctrl+V 하면 해당 월에 엑셀 근무표가 바로 붙습니다."))
         self.year_scroll = QScrollArea()
         self.year_scroll.setWidgetResizable(True)
+        self.year_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.year_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.year_scroll_content = QWidget()
         self.year_scroll_layout = QVBoxLayout(self.year_scroll_content)
         self.year_scroll.setWidget(self.year_scroll_content)
@@ -2518,10 +2521,10 @@ class MainWindow(QMainWindow):
                 self._clear_layout(child_layout)  # type: ignore[arg-type]
 
     def configure_roster_table_layout(self, table: QTableWidget, date_count: int, row_count: int, *, overview: bool = False) -> None:
-        """Make roster tables compact and avoid horizontal scrolling."""
+        """Make roster tables compact and let the page scroll instead of the table."""
         table.setWordWrap(False)
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff if overview else Qt.ScrollBarAsNeeded)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         table.setAlternatingRowColors(False)
         table.setShowGrid(True)
 
@@ -2537,7 +2540,7 @@ class MainWindow(QMainWindow):
         header_font = header.font()
         header_font.setPointSize(HEADER_FONT_SIZE)
         header.setFont(header_font)
-        header.setFixedHeight(34)
+        header.setFixedHeight(ROSTER_HEADER_HEIGHT)
 
         table.setColumnWidth(0, NAME_COL_WIDTH)
         table.setColumnWidth(1, ID_COL_WIDTH)
@@ -2546,9 +2549,15 @@ class MainWindow(QMainWindow):
         for row in range(table.rowCount()):
             table.setRowHeight(row, COMPACT_ROW_HEIGHT)
 
-        if overview:
-            table.setMinimumWidth(NAME_COL_WIDTH + ID_COL_WIDTH + date_count * DAY_COL_WIDTH + 8)
-            table.setFixedHeight(36 + max(1, row_count) * COMPACT_ROW_HEIGHT)
+        table_width = table.frameWidth() * 2 + 2
+        if table.verticalHeader().isVisible():
+            table_width += table.verticalHeader().width()
+        table_width += sum(table.columnWidth(col) for col in range(table.columnCount()))
+
+        table_height = table.frameWidth() * 2 + 2 + ROSTER_HEADER_HEIGHT
+        table_height += sum(table.rowHeight(row) for row in range(table.rowCount()))
+
+        table.setFixedSize(table_width, table_height)
 
     def _make_schedule_view_table(self, result: ScheduleResult) -> QTableWidget:
         dates = month_dates(result.year, result.month)
