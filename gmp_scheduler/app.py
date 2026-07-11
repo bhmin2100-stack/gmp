@@ -88,6 +88,7 @@ STATS_NAME_COL_WIDTH = 128
 STATS_ID_COL_WIDTH = 64
 STATS_MONTH_COL_WIDTH = 58
 STATS_METRIC_COL_WIDTH = 68
+STATS_RATE_COL_WIDTH = 94
 STATS_ROW_HEIGHT = 24
 VIEW_LEGACY = "legacy"
 VIEW_V11 = "V11"
@@ -102,6 +103,18 @@ RULE_SETTING_OPTIONS = (
 LEGACY_LABEL = "기존"
 LOCKED_SPLIT_COLOR = QColor("#f3f3f3")
 TEAM_SPLIT_START_DATE = date(2026, 8, 1)
+
+
+class SortableTableWidgetItem(QTableWidgetItem):
+    def __init__(self, text: str, sort_value: object = None) -> None:
+        super().__init__(text)
+        self.sort_value = sort_value
+
+    def __lt__(self, other) -> bool:  # type: ignore[override]
+        other_value = getattr(other, "sort_value", None)
+        if self.sort_value is not None and other_value is not None:
+            return self.sort_value < other_value
+        return self.text() < other.text()
 
 
 def apply_light_theme(app: QApplication) -> None:
@@ -3174,6 +3187,7 @@ class MainWindow(QMainWindow):
         table.setFixedSize(table_width, table_height)
 
     def configure_stats_table_layout(self, table: QTableWidget, *, month_matrix: bool = False) -> None:
+        table.setSortingEnabled(False)
         table.setWordWrap(False)
         table.setAlternatingRowColors(False)
         table.verticalHeader().setVisible(False)
@@ -3186,8 +3200,13 @@ class MainWindow(QMainWindow):
             return
         table.setColumnWidth(0, STATS_NAME_COL_WIDTH)
         if month_matrix:
-            for col in range(1, table.columnCount()):
+            if table.columnCount() > 1:
+                table.setColumnWidth(1, STATS_METRIC_COL_WIDTH)
+            if table.columnCount() > 2:
+                table.setColumnWidth(2, STATS_RATE_COL_WIDTH)
+            for col in range(3, table.columnCount()):
                 table.setColumnWidth(col, STATS_MONTH_COL_WIDTH)
+            table.setSortingEnabled(True)
             return
         if table.columnCount() > 1:
             table.setColumnWidth(1, STATS_ID_COL_WIDTH)
@@ -3992,6 +4011,8 @@ class MainWindow(QMainWindow):
 
         people: Dict[str, Dict[str, str]] = {}
         counts: Dict[str, Dict[str, int]] = {}
+        month_presence: Dict[str, set[str]] = {}
+        eligible_dates: Dict[str, set[date]] = {}
         for row in rows:
             name = str(row.get("name") or "")
             employee_no = str(row.get("employee_no") or "")
@@ -3999,58 +4020,118 @@ class MainWindow(QMainWindow):
             if employee_key in excluded:
                 continue
             d = date.fromisoformat(str(row.get("work_date")))
+            month_key = f"{d.year}-{d.month:02d}"
+            if month_key not in month_keys:
+                continue
+            people.setdefault(employee_key, {"name": name, "employee_no": employee_no})
+            counts.setdefault(employee_key, {key: 0 for key in month_keys})
+            month_presence.setdefault(employee_key, set()).add(month_key)
+            eligible_dates.setdefault(employee_key, set()).add(d)
+
             shift_key = self.monthly_stats_shift_key(str(row.get("shift_code") or OFF))
             if shift_key is None:
                 continue
             if not any((date_key, shift_key) in selected_filters for date_key in self.monthly_stats_date_keys(d)):
                 continue
-            month_key = f"{d.year}-{d.month:02d}"
-            people.setdefault(employee_key, {"name": name, "employee_no": employee_no})
-            counts.setdefault(employee_key, {key: 0 for key in month_keys})
-            if month_key in counts[employee_key]:
-                counts[employee_key][month_key] += 1
+            counts[employee_key][month_key] += 1
+
+        current_people = {
+            key: value
+            for key, value in self.latest_stats_people(end_year, end_month).items()
+            if key not in excluded
+        }
+        current_people_keys = set(current_people)
 
         if self.latest_stats_people_only():
-            latest_people = self.latest_stats_people(end_year, end_month)
-            people = {
-                key: latest_people[key]
-                for key in latest_people
-                if key not in excluded
-            }
+            people = dict(current_people)
             counts = {
                 key: counts.get(key, {month_key: 0 for month_key in month_keys})
                 for key in people
             }
+            month_presence = {
+                key: month_presence.get(key, set())
+                for key in people
+            }
+            eligible_dates = {
+                key: eligible_dates.get(key, set())
+                for key in people
+            }
 
         sorted_keys = sorted(people, key=lambda key: (people[key]["name"], people[key]["employee_no"]))
-        month_color_values = {
-            month_key: [
-                float(counts.get(employee_key, {}).get(month_key, 0))
-                for employee_key in sorted_keys
-            ]
-            for month_key in month_keys
+        totals = {
+            employee_key: sum(counts.get(employee_key, {}).get(month_key, 0) for month_key in month_keys)
+            for employee_key in sorted_keys
         }
+        count_color_values: List[float] = []
+        for employee_key in sorted_keys:
+            total = totals[employee_key]
+            if total > 0:
+                count_color_values.append(float(total))
+            present_months = month_presence.get(employee_key, set())
+            for month_key in month_keys:
+                if month_key not in present_months:
+                    continue
+                value = counts.get(employee_key, {}).get(month_key, 0)
+                if value > 0:
+                    count_color_values.append(float(value))
 
         table = self.cumulative_stats_table
         self.current_stats_row_people = []
+        table.setSortingEnabled(False)
         table.clear()
-        table.setColumnCount(1 + len(month_keys))
+        table.setColumnCount(3 + len(month_keys))
         table.setRowCount(len(sorted_keys))
-        table.setHorizontalHeaderLabels(["이름"] + month_keys)
+        table.setHorizontalHeaderLabels(["이름", "계", "근무율"] + month_keys)
+        inactive_name_color = QColor("#9aa0a6")
+        missing_text_color = QColor("#a8adb5")
+        missing_background = QColor("#f6f7f9")
         for row_index, employee_key in enumerate(sorted_keys):
             person = people[employee_key]
             name = person["name"]
             employee_no = person["employee_no"]
             label = name if not employee_no else f"{name} / {employee_no}"
             self.current_stats_row_people.append((employee_key, label))
-            name_item = QTableWidgetItem(label)
+            is_current_person = not current_people_keys or employee_key in current_people_keys
+            name_item = SortableTableWidgetItem(label, (0 if is_current_person else 1, name, employee_no))
+            name_item.setData(Qt.UserRole, employee_key)
+            name_item.setData(Qt.UserRole + 1, label)
+            if not is_current_person:
+                name_item.setForeground(inactive_name_color)
             table.setItem(row_index, 0, name_item)
-            for col_offset, month_key in enumerate(month_keys, start=1):
+
+            total = totals[employee_key]
+            total_item = SortableTableWidgetItem(str(total), total)
+            total_item.setTextAlignment(Qt.AlignCenter)
+            if total > 0:
+                total_item.setBackground(self._relative_gradient_color(float(total), count_color_values))
+            table.setItem(row_index, 1, total_item)
+
+            eligible_count = len(eligible_dates.get(employee_key, set()))
+            if eligible_count:
+                rate_value = total / eligible_count
+                rate_text = f"{total}/{eligible_count} ({rate_value * 100:.1f}%)"
+                rate_item = SortableTableWidgetItem(rate_text, rate_value)
+            else:
+                rate_item = SortableTableWidgetItem("없음", -1)
+                rate_item.setForeground(missing_text_color)
+                rate_item.setBackground(missing_background)
+            rate_item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row_index, 2, rate_item)
+
+            present_months = month_presence.get(employee_key, set())
+            for col_offset, month_key in enumerate(month_keys, start=3):
+                if month_key not in present_months:
+                    item = SortableTableWidgetItem("없음", -1)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    item.setForeground(missing_text_color)
+                    item.setBackground(missing_background)
+                    table.setItem(row_index, col_offset, item)
+                    continue
                 value = counts.get(employee_key, {}).get(month_key, 0)
-                item = QTableWidgetItem(str(value))
+                item = SortableTableWidgetItem(str(value), value)
                 item.setTextAlignment(Qt.AlignCenter)
                 if value > 0:
-                    item.setBackground(self._relative_gradient_color(float(value), month_color_values[month_key]))
+                    item.setBackground(self._relative_gradient_color(float(value), count_color_values))
                 table.setItem(row_index, col_offset, item)
 
     def render_saved_months_as_main_stat(self, month_rows: List[Dict[str, object]]) -> None:
@@ -4264,8 +4345,15 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
         row = self.cumulative_stats_table.rowAt(pos.y())
-        if 0 <= row < len(self.current_stats_row_people):
+        employee_key = ""
+        label = ""
+        name_item = self.cumulative_stats_table.item(row, 0) if row >= 0 else None
+        if name_item:
+            employee_key = str(name_item.data(Qt.UserRole) or "")
+            label = str(name_item.data(Qt.UserRole + 1) or "")
+        if not employee_key and 0 <= row < len(self.current_stats_row_people):
             employee_key, label = self.current_stats_row_people[row]
+        if employee_key:
             menu.addAction(f"{label} 제외").triggered.connect(
                 lambda _checked=False, m=mode, k=employee_key, l=label: self.exclude_stats_person(m, k, l)
             )
@@ -4334,7 +4422,7 @@ class MainWindow(QMainWindow):
         if high <= low:
             if high <= 0:
                 return QColor("#ffffff")
-            ratio = 1.0
+            ratio = 0.0
         else:
             ratio = min(1.0, max(0.0, (value - low) / (high - low)))
         stops = [
