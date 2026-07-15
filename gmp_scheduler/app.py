@@ -1230,6 +1230,12 @@ class MainWindow(QMainWindow):
 
     def on_update_check_finished(self, info: object, error: object, manual: bool) -> None:
         if error:
+            if manual and isinstance(error, updater.UpdateAuthenticationError):
+                QMessageBox.warning(self, "업데이트 확인", str(error))
+                return
+            if manual and updater.is_packaged_app() and not updater.selected_channel().direct_exe_url:
+                QMessageBox.warning(self, "업데이트 확인", str(error))
+                return
             if manual:
                 if updater.is_packaged_app():
                     answer = QMessageBox.question(
@@ -1263,6 +1269,9 @@ class MainWindow(QMainWindow):
                 )
             return
 
+        self.show_update_prompt(info)
+        return
+
         answer = QMessageBox.question(
             self,
             "업데이트",
@@ -1277,7 +1286,27 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Ok:
             self.start_update_download(info)
 
+    def show_update_prompt(self, info: updater.UpdateInfo) -> None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("업데이트")
+        notes = f"\n\n변경 내용:\n{info.notes}" if info.notes else ""
+        dialog.setText(
+            "새 버전이 있습니다.\n\n"
+            f"현재: {info.current_label}\n"
+            f"최신: {info.latest_label}{notes}\n\n"
+            "업데이트하면 프로그램을 종료한 뒤 새 버전으로 다시 실행합니다.\n"
+            "근무표 DB와 사용자 데이터는 변경하지 않습니다."
+        )
+        update_button = dialog.addButton("지금 업데이트", QMessageBox.AcceptRole)
+        dialog.addButton("나중에", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is update_button:
+            self.start_update_download(info)
+
     def start_update_download(self, info: updater.UpdateInfo) -> None:
+        if install_error := updater.update_install_error():
+            QMessageBox.warning(self, "Update", install_error)
+            return
         if self._update_download_thread is not None:
             self.statusBar().showMessage("업데이트 다운로드가 이미 진행 중입니다.", 3000)
             return

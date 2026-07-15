@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+import urllib.error
+from pathlib import Path
+from unittest.mock import patch
+
+from gmp_scheduler import updater
+
+
+class UpdaterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.company = updater.COMPANY_CHANNEL
+        self.release = {"tag_name": "0.2.11", "published_at": "2026-07-15T00:00:00Z", "body": "Release notes", "assets": [{"name": "GMP-Scheduler.exe", "browser_download_url": "https://company/exe", "size": 12}, {"name": "version.json", "browser_download_url": "https://company/meta"}]}
+
+    def test_company_release_manager_manifest_is_parsed(self) -> None:
+        manifest = {"appId": "gmp-scheduler", "name": "GMP Scheduler", "version": "0.2.11", "asset": "GMP-Scheduler.exe", "downloadUrl": "https://company/download/exe", "sha256": "abc", "notes": "Fixed scheduling", "publishedAtUtc": "2026-07-15T00:00:00Z"}
+        info = updater._update_info_from_release(self.company, self.release, manifest, None)
+        self.assertEqual(info.exe_url, manifest["downloadUrl"])
+        self.assertEqual(info.notes, "Fixed scheduling")
+        self.assertEqual(info.latest_build_date, manifest["publishedAtUtc"])
+        self.assertFalse(info.build_id_updates)
+
+    def test_legacy_manifest_is_compatible(self) -> None:
+        manifest = {"version": "0.2.11", "build_id": "123-1", "commit": "abc", "build_date": "date", "exe_asset": "GMP-Scheduler.exe", "sha256": "def", "size": 99}
+        info = updater._update_info_from_release(updater.PERSONAL_CHANNEL, self.release, manifest, None)
+        self.assertEqual(info.latest_build_id, "123-1")
+        self.assertEqual(info.exe_url, "https://company/exe")
+        self.assertEqual(info.size, 99)
+
+    def test_latest_api_response_loads_version_asset(self) -> None:
+        def fake_read(url: str, timeout: int) -> dict:
+            return self.release if url == self.company.release_api_url else {"version": "0.2.11", "downloadUrl": "https://company/exe"}
+        with patch.object(updater, "_read_json", side_effect=fake_read):
+            info = updater._fetch_update_info_from_api(self.company)
+        self.assertEqual(info.latest_version, "0.2.11")
+        self.assertEqual(info.exe_url, "https://company/exe")
+
+    def test_company_release_requires_both_assets(self) -> None:
+        release = {"assets": [{"name": "GMP-Scheduler.exe", "browser_download_url": "https://company/exe"}]}
+        with patch.object(updater, "_read_json", return_value=release):
+            with self.assertRaisesRegex(RuntimeError, "version.json"):
+                updater._fetch_update_info_from_api(self.company)
+
+    def test_company_same_version_does_not_repeat_update(self) -> None:
+        info = updater.UpdateInfo("0.2.10", "old", "", "0.2.10", "new", "", "", "", "", channel="company")
+        self.assertFalse(info.is_available)
+        newer = updater.UpdateInfo("0.2.10", "old", "", "0.2.11", "", "", "", "", "", channel="company")
+        self.assertTrue(newer.is_available)
+
+    def test_build_channel_is_embedded_not_read_from_environment(self) -> None:
+        with patch.object(updater, "UPDATE_CHANNEL", "company"):
+            self.assertEqual(updater.selected_channel(), updater.COMPANY_CHANNEL)
+        with patch.object(updater, "UPDATE_CHANNEL", "personal"):
+            self.assertEqual(updater.selected_channel(), updater.PERSONAL_CHANNEL)
+
+    def test_version_comparison_and_notes_fallback(self) -> None:
+        self.assertGreater(updater.compare_versions("1.10.0", "1.9.9"), 0)
+        self.assertEqual(updater.compare_versions("1.0", "1.0.0"), 0)
+        self.assertLess(updater.compare_versions("1.0.0", "1.0.1"), 0)
+        info = updater._update_info_from_release(self.company, self.release, {"version": "0.2.11"}, None)
+        self.assertEqual(info.notes, "Release notes")
+
+    def test_sha256_mismatch_removes_download(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "update"
+            info = updater.UpdateInfo("0", "", "", "1", "", "", "", "", "https://invalid", sha256="not-a-hash")
+            with patch.object(updater, "update_work_dir", return_value=target), patch.object(updater.urllib.request, "urlopen") as urlopen:
+                response = urlopen.return_value.__enter__.return_value
+                response.headers.get.return_value = "3"
+                response.read.side_effect = [b"abc", b""]
+                with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                    updater.download_update(info)
+            self.assertFalse(list(target.glob("*.new.exe")))
+
+    def test_401_and_403_are_clear_authentication_errors(self) -> None:
+        for status in (401, 403):
+            error = urllib.error.HTTPError("https://company", status, "Denied", {}, None)
+            with patch.object(updater.urllib.request, "urlopen", side_effect=error):
+                with self.assertRaises(updater.UpdateAuthenticationError) as raised:
+                    updater._read_url_bytes("https://company", 1)
+            self.assertIn("인증", str(raised.exception))
+
+    def test_update_script_only_replaces_executable_not_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.object(updater, "update_work_dir", return_value=Path(temp) / "work"):
+            root = Path(temp)
+            database = root / "gmp_scheduler.sqlite3"
+            database.write_bytes(b"database")
+            script = updater._write_update_script(root / "GMP-Scheduler.exe", root / "new.exe", 42)
+            self.assertTrue(database.exists())
+            self.assertNotIn(str(database), script.read_text(encoding="utf-8-sig"))
+
+
+if __name__ == "__main__":
+    unittest.main()

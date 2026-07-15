@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,20 +17,53 @@ from typing import Callable, Optional
 from . import __version__
 
 try:
-    from .build_info import BUILD_COMMIT, BUILD_DATE, BUILD_ID
+    from .build_info import APP_VERSION, BUILD_COMMIT, BUILD_DATE, BUILD_ID, UPDATE_CHANNEL
 except Exception:  # pragma: no cover - build metadata is optional in source runs.
+    APP_VERSION = __version__
     BUILD_COMMIT = "local"
     BUILD_DATE = ""
     BUILD_ID = "local"
+    UPDATE_CHANNEL = "personal"
 
 
-RELEASE_API_URL = "https://api.github.com/repos/bhmin2100-stack/gmp/releases/tags/windows-latest"
-RELEASE_PAGE_URL = "https://github.com/bhmin2100-stack/gmp/releases/tag/windows-latest"
-DIRECT_EXE_URL = "https://github.com/bhmin2100-stack/gmp/releases/download/windows-latest/GMP-Scheduler.exe"
-DIRECT_VERSION_URL = "https://github.com/bhmin2100-stack/gmp/releases/download/windows-latest/version.json"
 EXE_ASSET_NAME = "GMP-Scheduler.exe"
 VERSION_ASSET_NAME = "version.json"
+PERSONAL_RELEASE_API_URL = "https://api.github.com/repos/bhmin2100-stack/gmp/releases/tags/windows-latest"
+PERSONAL_RELEASE_PAGE_URL = "https://github.com/bhmin2100-stack/gmp/releases/tag/windows-latest"
+PERSONAL_DIRECT_EXE_URL = "https://github.com/bhmin2100-stack/gmp/releases/download/windows-latest/GMP-Scheduler.exe"
+PERSONAL_DIRECT_VERSION_URL = "https://github.com/bhmin2100-stack/gmp/releases/download/windows-latest/version.json"
+COMPANY_RELEASE_API_URL = "https://github.samsungds.net/api/v3/repos/bh2-min/gmp/releases/latest"
+COMPANY_RELEASE_PAGE_URL = "https://github.samsungds.net/bh2-min/gmp/releases"
 USER_AGENT = f"GMP-Scheduler/{__version__}"
+
+
+class UpdateAuthenticationError(RuntimeError):
+    """The release API requires an authenticated Enterprise session."""
+
+
+@dataclass(frozen=True)
+class UpdateChannel:
+    name: str
+    release_api_url: str
+    release_page_url: str
+    direct_exe_url: str = ""
+    direct_version_url: str = ""
+    build_id_updates: bool = False
+
+
+PERSONAL_CHANNEL = UpdateChannel(
+    name="personal",
+    release_api_url=PERSONAL_RELEASE_API_URL,
+    release_page_url=PERSONAL_RELEASE_PAGE_URL,
+    direct_exe_url=PERSONAL_DIRECT_EXE_URL,
+    direct_version_url=PERSONAL_DIRECT_VERSION_URL,
+    build_id_updates=True,
+)
+COMPANY_CHANNEL = UpdateChannel(
+    name="company",
+    release_api_url=COMPANY_RELEASE_API_URL,
+    release_page_url=COMPANY_RELEASE_PAGE_URL,
+)
 
 
 @dataclass(frozen=True)
@@ -45,15 +79,16 @@ class UpdateInfo:
     exe_url: str
     sha256: str = ""
     size: int = 0
+    notes: str = ""
+    channel: str = "personal"
+    build_id_updates: bool = False
 
     @property
     def is_available(self) -> bool:
         version_cmp = compare_versions(self.latest_version, self.current_version)
-        if version_cmp > 0:
-            return True
-        if version_cmp < 0:
-            return False
-        if self.current_build_id in ("", "local"):
+        if version_cmp != 0:
+            return version_cmp > 0
+        if not self.build_id_updates or self.current_build_id in ("", "local"):
             return False
         return bool(self.latest_build_id and self.latest_build_id != self.current_build_id)
 
@@ -68,6 +103,10 @@ class UpdateInfo:
         if self.latest_build_id:
             return f"{self.latest_version} ({self.latest_build_id})"
         return self.latest_version
+
+
+def selected_channel() -> UpdateChannel:
+    return COMPANY_CHANNEL if str(UPDATE_CHANNEL).strip().lower() == "company" else PERSONAL_CHANNEL
 
 
 def is_packaged_app() -> bool:
@@ -88,111 +127,102 @@ def compare_versions(left: str, right: str) -> int:
     max_len = max(len(left_parts), len(right_parts), 1)
     left_parts += [0] * (max_len - len(left_parts))
     right_parts += [0] * (max_len - len(right_parts))
-    if left_parts > right_parts:
-        return 1
-    if left_parts < right_parts:
-        return -1
-    return 0
+    return (left_parts > right_parts) - (left_parts < right_parts)
 
 
 def fetch_update_info(timeout: int = 10) -> UpdateInfo:
+    channel = selected_channel()
     try:
-        return _fetch_update_info_from_api(timeout=timeout)
+        return _fetch_update_info_from_api(channel, timeout=timeout)
+    except UpdateAuthenticationError:
+        raise
     except Exception as api_error:
+        if not channel.direct_version_url:
+            raise RuntimeError(
+                "업데이트 정보를 확인하지 못했습니다.\n"
+                f"- 배포 채널: {channel.name}\n- API: {api_error}\n- 확인 URL: {channel.release_page_url}"
+            ) from api_error
         try:
-            return _fetch_update_info_from_direct_assets(timeout=timeout)
+            return _fetch_update_info_from_direct_assets(channel, timeout=timeout)
         except Exception as direct_error:
             raise RuntimeError(
                 "GitHub 업데이트 확인에 실패했습니다.\n"
-                f"- API: {api_error}\n"
-                f"- 직접 다운로드 URL: {direct_error}\n"
-                f"- 확인 URL: {RELEASE_PAGE_URL}"
+                f"- API: {api_error}\n- 직접 다운로드 URL: {direct_error}\n- 확인 URL: {channel.release_page_url}"
             ) from direct_error
 
 
 def direct_download_update_info() -> UpdateInfo:
+    channel = selected_channel()
+    if not channel.direct_exe_url:
+        raise RuntimeError("이 회사 배포 채널은 Release API 확인 후에만 업데이트할 수 있습니다.")
     return UpdateInfo(
-        current_version=current_version(),
-        current_build_id=current_build_id(),
-        current_commit=str(BUILD_COMMIT or ""),
-        latest_version=current_version(),
-        latest_build_id="direct-download",
-        latest_commit="",
-        latest_build_date="",
-        release_url=RELEASE_PAGE_URL,
-        exe_url=DIRECT_EXE_URL,
-        sha256="",
-        size=0,
+        current_version=current_version(), current_build_id=current_build_id(), current_commit=str(BUILD_COMMIT or ""),
+        latest_version=current_version(), latest_build_id="direct-download", latest_commit="", latest_build_date="",
+        release_url=channel.release_page_url, exe_url=channel.direct_exe_url, channel=channel.name,
+        build_id_updates=channel.build_id_updates,
     )
 
 
-def _fetch_update_info_from_api(timeout: int = 10) -> UpdateInfo:
-    release = _read_json(RELEASE_API_URL, timeout=timeout)
+def _fetch_update_info_from_api(channel: UpdateChannel, timeout: int = 10) -> UpdateInfo:
+    release = _read_json(channel.release_api_url, timeout=timeout)
     assets = release.get("assets") or []
     exe_asset = _find_asset(assets, EXE_ASSET_NAME)
-    if not exe_asset:
-        raise RuntimeError(f"{EXE_ASSET_NAME} release asset not found.")
-
-    metadata = {}
+    metadata: dict = {}
     version_asset = _find_asset(assets, VERSION_ASSET_NAME)
+    if channel.name == COMPANY_CHANNEL.name and not exe_asset:
+        raise RuntimeError(f"{EXE_ASSET_NAME} release asset not found.")
+    if channel.name == COMPANY_CHANNEL.name and not version_asset:
+        raise RuntimeError(f"{VERSION_ASSET_NAME} release asset not found.")
     if version_asset:
-        try:
-            metadata = _read_json(str(version_asset["browser_download_url"]), timeout=timeout)
-        except Exception:
-            metadata = {}
+        metadata = _read_json(str(version_asset.get("browser_download_url") or ""), timeout=timeout)
+    return _update_info_from_release(channel, release, metadata, exe_asset)
 
+
+def _fetch_update_info_from_direct_assets(channel: UpdateChannel, timeout: int = 10) -> UpdateInfo:
+    metadata = _read_json(channel.direct_version_url, timeout=timeout)
+    if not str(metadata.get("version") or ""):
+        raise RuntimeError(f"{channel.direct_version_url} did not contain a version.")
+    return _update_info_from_release(channel, {}, metadata, None, fallback_exe_url=channel.direct_exe_url)
+
+
+def _update_info_from_release(
+    channel: UpdateChannel,
+    release: dict,
+    metadata: dict,
+    exe_asset: Optional[dict],
+    *,
+    fallback_exe_url: str = "",
+) -> UpdateInfo:
+    asset_name = str(metadata.get("asset") or metadata.get("exe_asset") or EXE_ASSET_NAME)
+    if exe_asset and str(exe_asset.get("name") or "") != asset_name:
+        exe_asset = None
+    assets = release.get("assets") or []
+    exe_asset = exe_asset or _find_asset(assets, asset_name)
+    exe_url = str(metadata.get("downloadUrl") or (exe_asset or {}).get("browser_download_url") or fallback_exe_url)
+    if not exe_url:
+        raise RuntimeError(f"{asset_name} release asset not found.")
     latest_version = str(metadata.get("version") or release.get("tag_name") or "")
-    latest_build_id = str(metadata.get("build_id") or release.get("target_commitish") or "")
-    latest_commit = str(metadata.get("commit") or "")
-    latest_build_date = str(metadata.get("build_date") or release.get("published_at") or "")
-    sha256 = str(metadata.get("sha256") or "")
-    size = int(metadata.get("size") or exe_asset.get("size") or 0)
-
-    return UpdateInfo(
-        current_version=current_version(),
-        current_build_id=current_build_id(),
-        current_commit=str(BUILD_COMMIT or ""),
-        latest_version=latest_version,
-        latest_build_id=latest_build_id,
-        latest_commit=latest_commit,
-        latest_build_date=latest_build_date,
-        release_url=str(release.get("html_url") or ""),
-        exe_url=str(exe_asset["browser_download_url"]),
-        sha256=sha256,
-        size=size,
-    )
-
-
-def _fetch_update_info_from_direct_assets(timeout: int = 10) -> UpdateInfo:
-    metadata = _read_json(DIRECT_VERSION_URL, timeout=timeout)
-    latest_version = str(metadata.get("version") or "")
-    latest_build_id = str(metadata.get("build_id") or "")
-    latest_commit = str(metadata.get("commit") or "")
-    latest_build_date = str(metadata.get("build_date") or "")
-    sha256 = str(metadata.get("sha256") or "")
-    size = int(metadata.get("size") or 0)
     if not latest_version:
-        raise RuntimeError(f"{DIRECT_VERSION_URL} did not contain a version.")
+        raise RuntimeError("Release metadata did not contain a version.")
     return UpdateInfo(
         current_version=current_version(),
         current_build_id=current_build_id(),
         current_commit=str(BUILD_COMMIT or ""),
         latest_version=latest_version,
-        latest_build_id=latest_build_id,
-        latest_commit=latest_commit,
-        latest_build_date=latest_build_date,
-        release_url=RELEASE_PAGE_URL,
-        exe_url=DIRECT_EXE_URL,
-        sha256=sha256,
-        size=size,
+        latest_build_id=str(metadata.get("build_id") or release.get("target_commitish") or ""),
+        latest_commit=str(metadata.get("commit") or ""),
+        latest_build_date=str(metadata.get("publishedAtUtc") or metadata.get("build_date") or release.get("published_at") or ""),
+        release_url=str(release.get("html_url") or channel.release_page_url),
+        exe_url=exe_url,
+        sha256=str(metadata.get("sha256") or ""),
+        size=int(metadata.get("size") or (exe_asset or {}).get("size") or 0),
+        notes=str(metadata.get("notes") or release.get("body") or "").strip(),
+        channel=channel.name,
+        build_id_updates=channel.build_id_updates,
     )
 
 
-def download_update(
-    info: UpdateInfo,
-    progress: Optional[Callable[[int, int], None]] = None,
-    timeout: int = 30,
-) -> Path:
+def download_update(info: UpdateInfo, progress: Optional[Callable[[int, int], None]] = None, timeout: int = 30) -> Path:
     update_dir = update_work_dir()
     update_dir.mkdir(parents=True, exist_ok=True)
     target = update_dir / f"{_safe_name(info.latest_build_id or info.latest_version)}.new.exe"
@@ -203,10 +233,7 @@ def download_update(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             total = int(response.headers.get("Content-Length") or info.size or 0)
             with target.open("wb") as handle:
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
+                while chunk := response.read(1024 * 1024):
                     handle.write(chunk)
                     hasher.update(chunk)
                     downloaded += len(chunk)
@@ -217,39 +244,45 @@ def download_update(
         try:
             _download_file_with_powershell(info.exe_url, target, timeout=timeout)
         except Exception as ps_error:
-            raise RuntimeError(
-                f"업데이트 다운로드 실패: urllib={urllib_error}; PowerShell={ps_error}"
-            ) from ps_error
+            raise RuntimeError(f"업데이트 다운로드 실패: urllib={urllib_error}; PowerShell={ps_error}") from ps_error
         downloaded = target.stat().st_size
         hasher = hashlib.sha256(target.read_bytes())
         if progress:
             progress(downloaded, info.size or downloaded)
-    if info.sha256:
-        digest = hasher.hexdigest().lower()
-        if digest != info.sha256.lower():
-            target.unlink(missing_ok=True)
-            raise RuntimeError("Downloaded update checksum did not match the release metadata.")
+    if info.sha256 and hasher.hexdigest().lower() != info.sha256.lower():
+        target.unlink(missing_ok=True)
+        raise RuntimeError("다운로드한 업데이트 파일의 SHA-256 검증에 실패했습니다.")
     return target
+
+
+def update_install_error(current_exe: Optional[Path] = None) -> str:
+    if not is_packaged_app() and current_exe is None:
+        return "소스 실행 상태에서는 EXE 자동 업데이트를 할 수 없습니다. 배포용 GMP-Scheduler.exe를 실행하세요."
+    executable = (current_exe or Path(sys.executable)).resolve()
+    parent = executable.parent
+    probe = parent / f".gmp_update_write_test_{os.getpid()}"
+    try:
+        with probe.open("xb"):
+            pass
+        probe.unlink()
+    except (OSError, PermissionError) as exc:
+        return (
+            f"설치 폴더에 업데이트 파일을 쓸 권한이 없습니다.\n{parent}\n\n"
+            "GMP-Scheduler.exe를 사용자 쓰기 가능 폴더로 옮긴 뒤 다시 실행하세요. "
+            f"({exc})"
+        )
+    return ""
 
 
 def launch_self_update(downloaded_exe: Path) -> None:
     if not is_packaged_app():
-        raise RuntimeError("Self-update is only available from the packaged Windows EXE.")
+        raise RuntimeError("소스 실행 상태에서는 EXE 자동 업데이트를 할 수 없습니다.")
     current_exe = Path(sys.executable).resolve()
+    if error := update_install_error(current_exe):
+        raise RuntimeError(error)
     script = _write_update_script(current_exe=current_exe, downloaded_exe=downloaded_exe.resolve(), pid=os.getpid())
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    subprocess.Popen(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-        ],
-        close_fds=True,
-        creationflags=creationflags,
-    )
+    subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], close_fds=True, creationflags=creationflags)
 
 
 def update_work_dir() -> Path:
@@ -265,38 +298,32 @@ def _read_url_bytes(url: str, timeout: int) -> bytes:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read()
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise UpdateAuthenticationError("회사 GitHub Release 저장소 인증이 필요합니다. 배포 관리자에게 일반 사용자 읽기 권한을 확인해 달라고 요청하세요.") from error
+        raise RuntimeError(f"HTTP {error.code}: {error.reason}") from error
     except Exception as urllib_error:
         if os.name != "nt":
             raise
         try:
             return _read_url_with_powershell(url, timeout=timeout)
         except Exception as ps_error:
-            raise RuntimeError(
-                f"urllib={urllib_error}; PowerShell={ps_error}"
-            ) from ps_error
+            raise RuntimeError(f"urllib={urllib_error}; PowerShell={ps_error}") from ps_error
 
 
 def _read_url_with_powershell(url: str, timeout: int) -> bytes:
     command = (
-        "$ProgressPreference = 'SilentlyContinue'; "
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "$ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
         f"$response = Invoke-WebRequest -Uri {_ps_quote(url)} -UseBasicParsing -TimeoutSec {max(1, timeout)}; "
-        "$content = $response.Content; "
-        "if ($content -is [byte[]]) { "
-        "  [Console]::Out.Write([Convert]::ToBase64String($content)) "
-        "} else { "
-        "  $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$content); "
-        "  [Console]::Out.Write([Convert]::ToBase64String($bytes)) "
-        "}"
+        "$content = $response.Content; $bytes = if ($content -is [byte[]]) { $content } else { [System.Text.Encoding]::UTF8.GetBytes([string]$content) }; "
+        "[Console]::Out.Write([Convert]::ToBase64String($bytes))"
     )
-    completed = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        capture_output=True,
-        timeout=timeout + 15,
-    )
+    completed = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], capture_output=True, timeout=timeout + 15)
     if completed.returncode != 0:
         stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        if "401" in stderr or "403" in stderr:
+            raise UpdateAuthenticationError("회사 GitHub Release 저장소 인증이 필요합니다. 배포 관리자에게 일반 사용자 읽기 권한을 확인해 달라고 요청하세요.")
         raise RuntimeError(stderr or f"PowerShell exited with {completed.returncode}")
     return base64.b64decode(completed.stdout.strip())
 
@@ -304,16 +331,10 @@ def _read_url_with_powershell(url: str, timeout: int) -> bytes:
 def _download_file_with_powershell(url: str, target: Path, timeout: int) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     command = (
-        "$ProgressPreference = 'SilentlyContinue'; "
-        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
-        f"Invoke-WebRequest -Uri {_ps_quote(url)} -OutFile {_ps_quote(target)} "
-        f"-UseBasicParsing -TimeoutSec {max(1, timeout)}"
+        "$ProgressPreference = 'SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+        f"Invoke-WebRequest -Uri {_ps_quote(url)} -OutFile {_ps_quote(target)} -UseBasicParsing -TimeoutSec {max(1, timeout)}"
     )
-    completed = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        capture_output=True,
-        timeout=timeout + 60,
-    )
+    completed = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], capture_output=True, timeout=timeout + 60)
     if completed.returncode != 0:
         stderr = completed.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(stderr or f"PowerShell exited with {completed.returncode}")
@@ -322,10 +343,7 @@ def _download_file_with_powershell(url: str, target: Path, timeout: int) -> None
 
 
 def _find_asset(assets: list[dict], name: str) -> Optional[dict]:
-    for asset in assets:
-        if asset.get("name") == name:
-            return asset
-    return None
+    return next((asset for asset in assets if asset.get("name") == name), None)
 
 
 def _version_parts(value: str) -> list[int]:
@@ -333,8 +351,7 @@ def _version_parts(value: str) -> list[int]:
 
 
 def _safe_name(value: str) -> str:
-    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
-    return name or "GMP-Scheduler"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "GMP-Scheduler"
 
 
 def _ps_quote(value: Path | str) -> str:
@@ -355,48 +372,16 @@ $newExe = {_ps_quote(downloaded_exe)}
 $backupExe = {_ps_quote(backup_exe)}
 $logPath = {_ps_quote(log_path)}
 $pidToWait = {pid}
-
-function Move-WithRetry($source, $destination) {{
-    for ($i = 0; $i -lt 40; $i++) {{
-        try {{
-            Move-Item -LiteralPath $source -Destination $destination -Force
-            return
-        }} catch {{
-            Start-Sleep -Milliseconds 500
-        }}
-    }}
-    Move-Item -LiteralPath $source -Destination $destination -Force
-}}
-
+function Move-WithRetry($source, $destination) {{ for ($i = 0; $i -lt 40; $i++) {{ try {{ Move-Item -LiteralPath $source -Destination $destination -Force; return }} catch {{ Start-Sleep -Milliseconds 500 }} }}; Move-Item -LiteralPath $source -Destination $destination -Force }}
 try {{
     Wait-Process -Id $pidToWait -Timeout 60 -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 300
-    if (Test-Path -LiteralPath $backupExe) {{
-        Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue
-    }}
-    if (Test-Path -LiteralPath $targetExe) {{
-        Move-WithRetry $targetExe $backupExe
-    }}
-    try {{
-        Move-WithRetry $newExe $targetExe
-    }} catch {{
-        if ((Test-Path -LiteralPath $backupExe) -and -not (Test-Path -LiteralPath $targetExe)) {{
-            Move-Item -LiteralPath $backupExe -Destination $targetExe -Force
-        }}
-        throw
-    }}
+    if (Test-Path -LiteralPath $backupExe) {{ Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue }}
+    if (Test-Path -LiteralPath $targetExe) {{ Move-WithRetry $targetExe $backupExe }}
+    try {{ Move-WithRetry $newExe $targetExe }} catch {{ if ((Test-Path -LiteralPath $backupExe) -and -not (Test-Path -LiteralPath $targetExe)) {{ Move-Item -LiteralPath $backupExe -Destination $targetExe -Force }}; throw }}
     Start-Process -FilePath $targetExe -WorkingDirectory (Split-Path -Parent $targetExe)
     Start-Sleep -Seconds 2
-    if (Test-Path -LiteralPath $backupExe) {{
-        Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue
-    }}
-}} catch {{
-    $_ | Out-File -FilePath $logPath -Encoding UTF8
-    exit 1
-}} finally {{
-    Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-}}
-""".lstrip(),
-        encoding="utf-8-sig",
-    )
+    if (Test-Path -LiteralPath $backupExe) {{ Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue }}
+}} catch {{ $_ | Out-File -FilePath $logPath -Encoding UTF8; exit 1 }} finally {{ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue }}
+""".lstrip(), encoding="utf-8-sig")
     return script

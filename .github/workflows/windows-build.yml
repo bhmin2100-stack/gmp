@@ -41,6 +41,7 @@ jobs:
           BUILD_COMMIT = "${{ github.sha }}"
           BUILD_ID = "${{ github.run_id }}-${{ github.run_attempt }}"
           BUILD_DATE = "$buildDate"
+          UPDATE_CHANNEL = "personal"
           "@ | Set-Content -Path gmp_scheduler\build_info.py -Encoding UTF8
 
       - name: Build EXE
