@@ -4,7 +4,9 @@ param([switch]$Clean)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSCommandPath
 Set-Location $root
-$python = if (Test-Path ".venv\\Scripts\\python.exe") { ".venv\\Scripts\\python.exe" } else { "python" }
+$python = if (Test-Path ".venv-company-py312\\Scripts\\python.exe") { ".venv-company-py312\\Scripts\\python.exe" } else { "python" }
+$companyRequirements = Join-Path $root "requirements-company-build.txt"
+$requiredPyInstallerVersion = "6.8.0"
 function Test-PythonImport([string]$ImportCode) {
     $previousPreference = $ErrorActionPreference
     try {
@@ -15,13 +17,16 @@ function Test-PythonImport([string]$ImportCode) {
         $ErrorActionPreference = $previousPreference
     }
 }
-if (-not (Test-PythonImport "import PySide6, openpyxl, holidays")) {
-    & $python -m pip install -r requirements.txt
-    if ($LASTEXITCODE -ne 0) { throw "Application dependency installation failed." }
+if (-not (Test-Path $companyRequirements)) {
+    throw "requirements-company-build.txt was not found."
 }
-if (-not (Test-PythonImport "import PyInstaller")) {
-    & $python -m pip install pyinstaller
-    if ($LASTEXITCODE -ne 0) { throw "PyInstaller installation failed." }
+$buildEnvironmentCheck = "import PySide6, openpyxl, holidays, PyInstaller; assert PyInstaller.__version__ == '$requiredPyInstallerVersion'"
+if (-not (Test-PythonImport $buildEnvironmentCheck)) {
+    & $python -m pip install --disable-pip-version-check -r $companyRequirements
+    if ($LASTEXITCODE -ne 0) { throw "Company build dependency installation failed." }
+}
+if (-not (Test-PythonImport $buildEnvironmentCheck)) {
+    throw "Company builds require PyInstaller $requiredPyInstallerVersion."
 }
 $version = (& $python -c "import gmp_scheduler; print(gmp_scheduler.__version__)").Trim()
 if (-not $version) { throw "Could not read gmp_scheduler.__version__." }
@@ -65,6 +70,7 @@ UPDATE_CHANNEL = "company"
     if (-not (Test-Path $builtExe)) { throw "The built EXE was not found." }
     Write-Host "Company EXE: $builtExe"
     Write-Host "Version: $version"
+    Write-Host "PyInstaller: $requiredPyInstallerVersion (legacy updater transition compatible)"
 } finally {
     [System.IO.File]::WriteAllBytes($buildInfo, $originalBuildInfo)
 }

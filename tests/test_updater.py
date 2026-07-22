@@ -58,6 +58,15 @@ class UpdaterTests(unittest.TestCase):
         with patch.object(updater, "UPDATE_CHANNEL", "personal"):
             self.assertEqual(updater.selected_channel(), updater.PERSONAL_CHANNEL)
 
+    def test_company_build_pins_legacy_updater_compatible_pyinstaller(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        requirements = (root / "requirements-company-build.txt").read_text(encoding="utf-8")
+        powershell = (root / "build-company-release.ps1").read_text(encoding="utf-8-sig")
+        batch = (root / "MAKE_COMPANY_EXE.bat").read_text(encoding="utf-8")
+        self.assertIn("pyinstaller==6.8.0", requirements.lower())
+        self.assertIn('$requiredPyInstallerVersion = "6.8.0"', powershell)
+        self.assertIn("PyInstaller.__version__ == '6.8.0'", batch)
+
     def test_version_comparison_and_notes_fallback(self) -> None:
         self.assertGreater(updater.compare_versions("1.10.0", "1.9.9"), 0)
         self.assertEqual(updater.compare_versions("1.0", "1.0.0"), 0)

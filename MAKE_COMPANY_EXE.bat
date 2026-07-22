@@ -3,6 +3,7 @@ setlocal EnableExtensions
 
 cd /d "%~dp0"
 title GMP Company EXE Builder
+set "VENV_DIR=.venv-company-py312"
 
 set "NO_PAUSE=0"
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
@@ -25,6 +26,11 @@ if not exist "build-company-release.ps1" (
     goto :Failed
 )
 
+if not exist "requirements-company-build.txt" (
+    echo [ERROR] requirements-company-build.txt was not found.
+    goto :Failed
+)
+
 echo [1/4] Checking Python...
 call :FindPython
 if not defined PYTHON_EXE (
@@ -41,29 +47,29 @@ if errorlevel 1 goto :PythonInstallFailed
 echo.
 
 echo [2/4] Preparing the private Python environment...
-if not exist ".venv\Scripts\python.exe" (
-    "%PYTHON_EXE%" %PYTHON_ARGS% -m venv .venv
+if not exist "%VENV_DIR%\Scripts\python.exe" (
+    "%PYTHON_EXE%" %PYTHON_ARGS% -m venv "%VENV_DIR%"
     if errorlevel 1 (
-        echo [ERROR] Could not create .venv.
+        echo [ERROR] Could not create %VENV_DIR%.
         goto :Failed
     )
 ) else (
-    echo Existing .venv will be reused.
+    echo Existing %VENV_DIR% will be reused.
 )
 echo.
 
 echo [3/4] Checking build packages...
-".venv\Scripts\python.exe" -c "import PySide6, openpyxl, holidays, PyInstaller" >nul 2>nul
+"%VENV_DIR%\Scripts\python.exe" -c "import PySide6, openpyxl, holidays, PyInstaller; assert PyInstaller.__version__ == '6.8.0'" >nul 2>nul
 if errorlevel 1 (
     echo Installing required packages. This can take several minutes...
-    ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt pyinstaller
+    "%VENV_DIR%\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements-company-build.txt
     if errorlevel 1 (
         echo [ERROR] Package installation failed.
         echo Check the company network, proxy, or package-download policy.
         goto :Failed
     )
 ) else (
-    echo Required packages are already installed.
+    echo Required packages and the transition-compatible builder are already installed.
 )
 echo.
 
@@ -99,17 +105,23 @@ set "PYTHON_ARGS="
 
 where py >nul 2>nul
 if not errorlevel 1 (
-    py -3 --version >nul 2>nul
+    py -3.12 --version >nul 2>nul
     if not errorlevel 1 (
         set "PYTHON_EXE=py"
-        set "PYTHON_ARGS=-3"
+        set "PYTHON_ARGS=-3.12"
+        exit /b 0
+    )
+    py -3.11 --version >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_EXE=py"
+        set "PYTHON_ARGS=-3.11"
         exit /b 0
     )
 )
 
 where python >nul 2>nul
 if not errorlevel 1 (
-    python --version >nul 2>nul
+    python -c "import sys; assert (3, 11) ^<= sys.version_info[:2] ^< (3, 13)" >nul 2>nul
     if not errorlevel 1 (
         set "PYTHON_EXE=python"
         exit /b 0
@@ -117,8 +129,11 @@ if not errorlevel 1 (
 )
 
 for /f "delims=" %%P in ('dir /b /s "%LocalAppData%\Programs\Python\Python3*\python.exe" 2^>nul') do (
-    set "PYTHON_EXE=%%P"
-    exit /b 0
+    "%%P" -c "import sys; assert (3, 11) ^<= sys.version_info[:2] ^< (3, 13)" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_EXE=%%P"
+        exit /b 0
+    )
 )
 
 exit /b 0
@@ -135,7 +150,7 @@ exit /b 0
 :PythonInstallFailed
 echo.
 echo [ERROR] Python could not be installed or found automatically.
-echo Ask the PC administrator to install Python 3.11 or newer, then double-click this file again.
+echo Ask the PC administrator to install Python 3.11 or 3.12, then double-click this file again.
 goto :Failed
 
 :Failed

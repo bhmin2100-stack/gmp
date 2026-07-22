@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 .Python
 .venv/
+.venv-company-py312/
 venv/
 env/
 *.egg-info/
