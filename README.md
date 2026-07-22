@@ -153,7 +153,11 @@ PC에서는 전용 `.venv-company-py312` 환경에서 로컬 빌드합니다. Py
 사내망에서 패키지 설치가 막히면 BAT가 개인 GitHub Actions에서 같은 버전과 커밋으로
 만든 회사 채널 EXE를 자동으로 받습니다. 이때 버전, Git 커밋, 회사 채널 및 SHA-256을
 모두 확인하므로 회사 PC에 Python을 별도로 설치할 필요가 없습니다. GitHub Actions가
-아직 끝나지 않았다는 안내가 나오면 잠시 뒤 BAT를 다시 실행합니다.
+아직 끝나지 않았다는 안내가 나오면 잠시 뒤 BAT를 다시 실행합니다. 회사 보안 정책이
+PowerShell의 GitHub Release 다운로드를 403으로 차단하면, BAT는 GitHub Desktop이
+Pull하면서 인증된 경로로 받아 둔 `company-build` 브랜치에서 같은 파일을 자동으로
+꺼냅니다. 해당 브랜치가 아직 없다는 안내가 나오면 GitHub Desktop에서 `Fetch origin`을
+한 번 누른 뒤 BAT를 다시 실행합니다.
 
 ## 자동 배정 기준
 

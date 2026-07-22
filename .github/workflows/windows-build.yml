@@ -94,6 +94,24 @@ jobs:
           }
           $companyMetadata | ConvertTo-Json | Set-Content -Path "dist\company-build.json" -Encoding UTF8
 
+      - name: Publish company build branch
+        shell: pwsh
+        env:
+          GH_PUSH_TOKEN: ${{ github.token }}
+        run: |
+          $publish = Join-Path $env:RUNNER_TEMP "gmp-company-build"
+          New-Item -ItemType Directory -Path $publish -Force | Out-Null
+          Copy-Item "dist\GMP-Scheduler-company.exe" $publish
+          Copy-Item "dist\company-build.json" $publish
+          Set-Location $publish
+          git init -b company-build
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add GMP-Scheduler-company.exe company-build.json
+          git commit -m "Company build $env:GMP_VERSION from ${{ github.sha }}"
+          git remote add origin "https://x-access-token:$env:GH_PUSH_TOKEN@github.com/${{ github.repository }}.git"
+          git push --force origin HEAD:company-build
+
       - name: Publish EXE to release
         uses: softprops/action-gh-release@v2
         with:

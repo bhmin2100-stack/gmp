@@ -73,8 +73,12 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn('update_channel -ne "company"', downloader)
         self.assertIn("Get-FileHash", downloader)
         self.assertIn('Join-Path $root ".git"', downloader)
+        self.assertIn('refs/remotes/origin/company-build', downloader)
+        self.assertIn("GitHubDesktop", downloader)
+        self.assertIn("archive --format=zip", downloader)
         self.assertIn("GMP-Scheduler-company.exe", workflow)
         self.assertIn("company-build.json", workflow)
+        self.assertIn("HEAD:company-build", workflow)
 
     def test_version_comparison_and_notes_fallback(self) -> None:
         self.assertGreater(updater.compare_versions("1.10.0", "1.9.9"), 0)

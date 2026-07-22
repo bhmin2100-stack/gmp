@@ -4,7 +4,8 @@ param(
     [string]$ExeUrl = "https://github.com/bhmin2100-stack/gmp/releases/download/windows-latest/GMP-Scheduler-company.exe",
     [string]$MetadataFile,
     [string]$ExeFile,
-    [string]$OutputPath
+    [string]$OutputPath,
+    [string]$BuildRef = "refs/remotes/origin/company-build"
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,36 +59,77 @@ $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("gmp-company-build-" + 
 $tempMetadata = Join-Path $tempRoot "company-build.json"
 $tempExe = Join-Path $tempRoot "GMP-Scheduler-company.exe"
 
+function Find-GitExecutable {
+    $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+    if ($gitCommand) {
+        return $gitCommand.Source
+    }
+
+    $desktopRoot = Join-Path $env:LOCALAPPDATA "GitHubDesktop"
+    $desktopGit = Get-ChildItem -Path (Join-Path $desktopRoot "app-*\resources\app\git\cmd\git.exe") -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1
+    if ($desktopGit) {
+        return $desktopGit.FullName
+    }
+    return $null
+}
+
+function Copy-CompanyBuildFromGitRef {
+    param([string]$GitRef)
+
+    $gitExe = Find-GitExecutable
+    if (-not $gitExe) {
+        throw "GitHub Release download was blocked and GitHub Desktop Git could not be found."
+    }
+
+    & $gitExe -C $root rev-parse --verify --quiet $GitRef 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "The company-build branch is not available locally. In GitHub Desktop, click Fetch origin after GitHub Actions finishes, then run the BAT again."
+    }
+
+    $archivePath = Join-Path $tempRoot "company-build.zip"
+    $extractPath = Join-Path $tempRoot "from-git"
+    & $gitExe -C $root archive --format=zip "--output=$archivePath" $GitRef
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $archivePath)) {
+        throw "Could not read the company-build branch downloaded by GitHub Desktop."
+    }
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath -Force
+    Copy-Item -LiteralPath (Join-Path $extractPath "company-build.json") -Destination $tempMetadata -Force
+    Copy-Item -LiteralPath (Join-Path $extractPath "GMP-Scheduler-company.exe") -Destination $tempExe -Force
+}
+
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-    if ($MetadataFile) {
+    if ($MetadataFile -and $ExeFile) {
         Copy-Item -LiteralPath $MetadataFile -Destination $tempMetadata
+        Copy-Item -LiteralPath $ExeFile -Destination $tempExe
     } else {
-        Write-Host "Downloading company build metadata..."
-        Invoke-WebRequest -UseBasicParsing -Uri $MetadataUrl -OutFile $tempMetadata
+        try {
+            Write-Host "Downloading company build metadata..."
+            Invoke-WebRequest -UseBasicParsing -Uri $MetadataUrl -OutFile $tempMetadata
+            Write-Host "Downloading transition-compatible company EXE..."
+            Invoke-WebRequest -UseBasicParsing -Uri $ExeUrl -OutFile $tempExe
+        } catch {
+            Write-Host "Direct GitHub Release download was blocked. Using the build fetched by GitHub Desktop..."
+            Copy-CompanyBuildFromGitRef -GitRef $BuildRef
+        }
     }
 
     $metadata = Get-Content -LiteralPath $tempMetadata -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($metadata.version -ne $sourceVersion) {
-        throw "The GitHub company build version is $($metadata.version), but this source is $sourceVersion. Wait for GitHub Actions to finish, then run the BAT again."
+        throw "The company build version is $($metadata.version), but this source is $sourceVersion. Wait for GitHub Actions to finish, click Fetch origin in GitHub Desktop, then run the BAT again."
     }
     if ($metadata.commit -ne $sourceCommit) {
-        throw "The GitHub company build is from commit $($metadata.commit), but this source is $sourceCommit. Wait for GitHub Actions to finish, then run the BAT again."
+        throw "The company build is from commit $($metadata.commit), but this source is $sourceCommit. Wait for GitHub Actions to finish, click Fetch origin in GitHub Desktop, then run the BAT again."
     }
     if ($metadata.update_channel -ne "company") {
-        throw "The downloaded build is not configured for the company update channel."
+        throw "The selected build is not configured for the company update channel."
     }
     if (-not $metadata.sha256) {
         throw "The company build metadata does not contain SHA-256."
-    }
-
-    if ($ExeFile) {
-        Copy-Item -LiteralPath $ExeFile -Destination $tempExe
-    } else {
-        Write-Host "Downloading transition-compatible company EXE..."
-        Invoke-WebRequest -UseBasicParsing -Uri $ExeUrl -OutFile $tempExe
     }
 
     $actualHash = (Get-FileHash -LiteralPath $tempExe -Algorithm SHA256).Hash.ToLowerInvariant()
