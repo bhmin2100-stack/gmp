@@ -24,8 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          pip install -r requirements-company-build.txt
 
       - name: Stamp build metadata
         shell: pwsh
@@ -46,7 +45,24 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --noconsole --onefile --name "GMP-Scheduler" --icon "assets\gmp-scheduler.ico" --add-data "assets\gmp-scheduler.png;assets" main.py
+          python -m PyInstaller --noconsole --onefile --name "GMP-Scheduler" --icon "assets\gmp-scheduler.ico" --add-data "assets\gmp-scheduler.png;assets" main.py
+
+      - name: Stamp company build metadata
+        shell: pwsh
+        run: |
+          @"
+          from __future__ import annotations
+
+          APP_VERSION = "$env:GMP_VERSION"
+          BUILD_COMMIT = "${{ github.sha }}"
+          BUILD_ID = "company-${{ github.run_id }}-${{ github.run_attempt }}"
+          BUILD_DATE = "$env:GMP_BUILD_DATE"
+          UPDATE_CHANNEL = "company"
+          "@ | Set-Content -Path gmp_scheduler\build_info.py -Encoding UTF8
+
+      - name: Build company EXE
+        run: |
+          python -m PyInstaller --noconsole --onefile --name "GMP-Scheduler-company" --icon "assets\gmp-scheduler.ico" --add-data "assets\gmp-scheduler.png;assets" --workpath build-company-actions --specpath build-company-actions main.py
 
       - name: Write release metadata
         shell: pwsh
@@ -65,6 +81,19 @@ jobs:
           }
           $metadata | ConvertTo-Json | Set-Content -Path "dist\version.json" -Encoding UTF8
 
+          $companyExe = "dist\GMP-Scheduler-company.exe"
+          $companyMetadata = [ordered]@{
+            version = $env:GMP_VERSION
+            commit = "${{ github.sha }}"
+            build_date = $env:GMP_BUILD_DATE
+            asset = "GMP-Scheduler-company.exe"
+            update_channel = "company"
+            pyinstaller = "6.8.0"
+            sha256 = (Get-FileHash $companyExe -Algorithm SHA256).Hash.ToLower()
+            size = (Get-Item $companyExe).Length
+          }
+          $companyMetadata | ConvertTo-Json | Set-Content -Path "dist\company-build.json" -Encoding UTF8
+
       - name: Publish EXE to release
         uses: softprops/action-gh-release@v2
         with:
@@ -76,6 +105,8 @@ jobs:
           files: |
             dist/GMP-Scheduler.exe
             dist/version.json
+            dist/GMP-Scheduler-company.exe
+            dist/company-build.json
           prerelease: true
           make_latest: true
           overwrite_files: true

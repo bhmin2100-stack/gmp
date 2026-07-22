@@ -63,9 +63,18 @@ class UpdaterTests(unittest.TestCase):
         requirements = (root / "requirements-company-build.txt").read_text(encoding="utf-8")
         powershell = (root / "build-company-release.ps1").read_text(encoding="utf-8-sig")
         batch = (root / "MAKE_COMPANY_EXE.bat").read_text(encoding="utf-8")
+        downloader = (root / "download-company-build.ps1").read_text(encoding="utf-8-sig")
+        workflow = (root / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
         self.assertIn("pyinstaller==6.8.0", requirements.lower())
         self.assertIn('$requiredPyInstallerVersion = "6.8.0"', powershell)
         self.assertIn("PyInstaller.__version__ == '6.8.0'", batch)
+        self.assertIn("download-company-build.ps1", batch)
+        self.assertNotIn("winget install", batch.lower())
+        self.assertIn('update_channel -ne "company"', downloader)
+        self.assertIn("Get-FileHash", downloader)
+        self.assertIn('Join-Path $root ".git"', downloader)
+        self.assertIn("GMP-Scheduler-company.exe", workflow)
+        self.assertIn("company-build.json", workflow)
 
     def test_version_comparison_and_notes_fallback(self) -> None:
         self.assertGreater(updater.compare_versions("1.10.0", "1.9.9"), 0)

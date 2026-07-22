@@ -31,13 +31,19 @@ if not exist "requirements-company-build.txt" (
     goto :Failed
 )
 
+if not exist "download-company-build.ps1" (
+    echo [ERROR] download-company-build.ps1 was not found.
+    goto :Failed
+)
+
 echo [1/4] Checking Python...
 call :FindPython
 if not defined PYTHON_EXE (
-    echo Python was not found. Trying a per-user install with winget...
-    call :InstallPython
-    if errorlevel 1 goto :PythonInstallFailed
-    call :FindPython
+    echo Python 3.11/3.12 was not found.
+    echo Downloading the matching company EXE built by GitHub Actions instead...
+    call :DownloadPrebuilt
+    if not errorlevel 1 goto :BuildComplete
+    goto :PrebuiltDownloadFailed
 )
 
 if not defined PYTHON_EXE goto :PythonInstallFailed
@@ -64,7 +70,10 @@ if errorlevel 1 (
     echo Installing required packages. This can take several minutes...
     "%VENV_DIR%\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements-company-build.txt
     if errorlevel 1 (
-        echo [ERROR] Package installation failed.
+        echo Package installation failed. Trying the matching GitHub Actions build...
+        call :DownloadPrebuilt
+        if not errorlevel 1 goto :BuildComplete
+        echo [ERROR] The package installation and prebuilt download both failed.
         echo Check the company network, proxy, or package-download policy.
         goto :Failed
     )
@@ -80,6 +89,7 @@ if errorlevel 1 (
     goto :Failed
 )
 
+:BuildComplete
 set "RESULT_EXE="
 for /r "%CD%\dist" %%F in (GMP-Scheduler.exe) do if exist "%%~fF" set "RESULT_EXE=%%~fF"
 
@@ -98,6 +108,10 @@ echo.
 if "%NO_PAUSE%"=="0" start "" explorer.exe /select,"%RESULT_EXE%"
 if "%NO_PAUSE%"=="0" pause
 exit /b 0
+
+:DownloadPrebuilt
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\download-company-build.ps1"
+exit /b %ERRORLEVEL%
 
 :FindPython
 set "PYTHON_EXE="
@@ -138,19 +152,17 @@ for /f "delims=" %%P in ('dir /b /s "%LocalAppData%\Programs\Python\Python3*\pyt
 
 exit /b 0
 
-:InstallPython
-where winget >nul 2>nul
-if errorlevel 1 exit /b 1
-
-winget install --id Python.Python.3.12 --exact --source winget --scope user --accept-package-agreements --accept-source-agreements --silent
-if errorlevel 1 exit /b 1
-
-exit /b 0
-
 :PythonInstallFailed
 echo.
-echo [ERROR] Python could not be installed or found automatically.
-echo Ask the PC administrator to install Python 3.11 or 3.12, then double-click this file again.
+echo [ERROR] Python 3.11 or 3.12 could not be used for a local build.
+echo Run this BAT on a PC with Python, or use the prebuilt download on a PC without Python.
+goto :Failed
+
+:PrebuiltDownloadFailed
+echo.
+echo [ERROR] The matching prebuilt company EXE could not be downloaded.
+echo Pull the latest main branch, wait for GitHub Actions to finish, and run this BAT again.
+echo Python is not required for the prebuilt download.
 goto :Failed
 
 :Failed

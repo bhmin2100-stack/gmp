@@ -148,10 +148,12 @@ https://github.com/bhmin2100-stack/gmp/releases/tag/windows-latest
 `dist\GMP-Scheduler.exe`를 Company Release Manager에 등록합니다.
 
 회사 빌드는 구버전 자동 업데이터에서 새 EXE를 처음 재실행할 때도 임시 Python DLL
-경로를 재사용하지 않도록 PyInstaller 6.8.0을 사용합니다. BAT와 PowerShell 빌드
-스크립트가 Python 3.11/3.12 전용 빌드 환경과 빌더 버전을 자동으로 맞추므로 사용자가
-별도로 설치할 필요는 없습니다. 기존 실행용 `.venv`와는 분리된
-`.venv-company-py312` 폴더를 사용합니다.
+경로를 재사용하지 않도록 PyInstaller 6.8.0을 사용합니다. Python 3.11/3.12가 있는
+PC에서는 전용 `.venv-company-py312` 환경에서 로컬 빌드합니다. Python이 없거나
+사내망에서 패키지 설치가 막히면 BAT가 개인 GitHub Actions에서 같은 버전과 커밋으로
+만든 회사 채널 EXE를 자동으로 받습니다. 이때 버전, Git 커밋, 회사 채널 및 SHA-256을
+모두 확인하므로 회사 PC에 Python을 별도로 설치할 필요가 없습니다. GitHub Actions가
+아직 끝나지 않았다는 안내가 나오면 잠시 뒤 BAT를 다시 실행합니다.
 
 ## 자동 배정 기준
 
