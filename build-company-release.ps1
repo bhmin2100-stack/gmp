@@ -28,7 +28,7 @@ if (-not $version) { throw "Could not read gmp_scheduler.__version__." }
 $buildInfo = Join-Path $root "gmp_scheduler\\build_info.py"
 $iconPath = Join-Path $root "assets\\gmp-scheduler.ico"
 $iconData = (Join-Path $root "assets\\gmp-scheduler.png") + ";assets"
-$originalBuildInfo = Get-Content -LiteralPath $buildInfo -Raw
+$originalBuildInfo = [System.IO.File]::ReadAllBytes($buildInfo)
 $buildDate = (Get-Date).ToUniversalTime().ToString("o")
 $commit = (git rev-parse HEAD).Trim()
 $buildId = "company-local-" + (Get-Date -Format "yyyyMMddHHmmss")
@@ -66,5 +66,5 @@ UPDATE_CHANNEL = "company"
     Write-Host "Company EXE: $builtExe"
     Write-Host "Version: $version"
 } finally {
-    $originalBuildInfo | Set-Content -LiteralPath $buildInfo -Encoding utf8
+    [System.IO.File]::WriteAllBytes($buildInfo, $originalBuildInfo)
 }
