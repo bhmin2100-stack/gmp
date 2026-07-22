@@ -62,10 +62,10 @@ def _generate_month_schedule_once(
     def prev_shift(emp: Employee, d: date) -> str:
         return schedule.get(d - timedelta(days=1), {}).get(emp.key, OFF)
 
-    def consecutive_work_before(emp: Employee, d: date) -> int:
+    def consecutive_day_swing_before(emp: Employee, d: date) -> int:
         n = 0
         cur = d - timedelta(days=1)
-        while cur in schedule and schedule[cur].get(emp.key, OFF) not in (OFF, SHIFT_GY_REST):
+        while cur in schedule and schedule[cur].get(emp.key, OFF) in (SHIFT_DAY, SHIFT_SWING):
             n += 1
             cur -= timedelta(days=1)
         return n
@@ -130,19 +130,20 @@ def _generate_month_schedule_once(
         else:
             score += (weekly_count - weekly_target + 1) * 40
 
-        cw = consecutive_work_before(emp, d)
         cgy = consecutive_gy_before(emp, d)
-        if cw >= rules.max_consecutive_work_days:
-            score += 1000
-        else:
-            score += cw * 5
         if shift in (SHIFT_GY, SHIFT_DUTY):
             if cgy >= rules.max_consecutive_gy:
                 score += 1000
             else:
                 score += cgy * 40
-        elif prev_shift(emp, d) in (SHIFT_GY, SHIFT_DUTY):
-            score += 30
+        else:
+            day_swing_run = consecutive_day_swing_before(emp, d)
+            if day_swing_run >= rules.max_consecutive_work_days:
+                score += 1000
+            else:
+                score += day_swing_run * 5
+            if prev_shift(emp, d) in (SHIFT_GY, SHIFT_DUTY):
+                score += 30
 
         if d in emp.unavailable_dates:
             score += 100000

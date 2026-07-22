@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -293,7 +294,29 @@ def launch_self_update(downloaded_exe: Path) -> None:
         raise RuntimeError(error)
     script = _write_update_script(current_exe=current_exe, downloaded_exe=downloaded_exe.resolve(), pid=os.getpid())
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], close_fds=True, creationflags=creationflags)
+    _reset_windows_dll_search_path()
+    subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        close_fds=True,
+        creationflags=creationflags,
+        env=_clean_update_environment(),
+    )
+
+
+def _clean_update_environment() -> dict[str, str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("_PYI_")
+    }
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return environment
+
+
+def _reset_windows_dll_search_path() -> None:
+    if os.name != "nt":
+        return
+    ctypes.windll.kernel32.SetDllDirectoryW(None)
 
 
 def update_work_dir() -> Path:
@@ -390,7 +413,15 @@ try {{
     if (Test-Path -LiteralPath $backupExe) {{ Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue }}
     if (Test-Path -LiteralPath $targetExe) {{ Move-WithRetry $targetExe $backupExe }}
     try {{ Move-WithRetry $newExe $targetExe }} catch {{ if ((Test-Path -LiteralPath $backupExe) -and -not (Test-Path -LiteralPath $targetExe)) {{ Move-Item -LiteralPath $backupExe -Destination $targetExe -Force }}; throw }}
+    Get-ChildItem Env: | Where-Object {{ $_.Name -like '_PYI_*' }} | ForEach-Object {{
+        [Environment]::SetEnvironmentVariable($_.Name, $null, 'Process')
+    }}
     $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+    $native = Add-Type -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetDllDirectory(string lpPathName);
+'@ -Name 'GmpUpdateNative' -Namespace 'Win32' -PassThru
+    $native::SetDllDirectory($null) | Out-Null
     Start-Process -FilePath $targetExe -WorkingDirectory (Split-Path -Parent $targetExe)
     Start-Sleep -Seconds 2
     if (Test-Path -LiteralPath $backupExe) {{ Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue }}

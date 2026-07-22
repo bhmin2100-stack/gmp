@@ -5,10 +5,26 @@ from datetime import date, timedelta
 from typing import Dict, List, Set
 
 from .calendar_utils import is_duty_day, month_dates
-from .models import OFF, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, Employee, ScheduleMap, ShiftRules
+from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ShiftRules
 from .pairing import PAIR_CATEGORY_LABELS, PAIR_CATEGORY_ORDER, pair_category, pair_coverage
 from .rule_utils import min_rules_for_date
 from .stats import compute_stats
+
+
+def max_consecutive_day_swing(
+    employee_key: str,
+    dates: List[date],
+    schedule: ScheduleMap,
+) -> int:
+    longest = 0
+    current = 0
+    for d in dates:
+        if schedule.get(d, {}).get(employee_key, OFF) in (SHIFT_DAY, SHIFT_SWING):
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
 
 
 def validate_schedule(
@@ -70,10 +86,12 @@ def validate_schedule(
             if shift == SHIFT_GY and schedule.get(prev_day, {}).get(emp_key, OFF) == SHIFT_DUTY:
                 warnings.append(f"{d.isoformat()} {emp.name} 당직 다음날 같은 사람이 G/지근 시작됨")
 
-    stats = compute_stats(employees, month_dates(year, month), schedule, holidays)
+    dates = month_dates(year, month)
+    stats = compute_stats(employees, dates, schedule, holidays)
     for s in stats.values():
-        if s.max_consecutive_work > rules.max_consecutive_work_days:
-            warnings.append(f"{s.name} 최대 연속근무 초과: {s.max_consecutive_work}/{rules.max_consecutive_work_days}")
+        day_swing_run = max_consecutive_day_swing(s.employee_key, dates, schedule)
+        if day_swing_run > rules.max_consecutive_work_days:
+            warnings.append(f"{s.name} 최대 연속 Day/SW 초과: {day_swing_run}/{rules.max_consecutive_work_days}")
         if s.max_consecutive_gy > rules.max_consecutive_gy:
             warnings.append(f"{s.name} 연속 GY 초과: {s.max_consecutive_gy}/{rules.max_consecutive_gy}")
 
@@ -113,7 +131,6 @@ def validate_schedule(
             warnings.append(f"신규 {emp.name} 휴일 D/S 경험 없음")
         if s.weekday_gy == 0:
             warnings.append(f"신규 {emp.name} 평일 G/지근 경험 없음")
-    dates = month_dates(year, month)
     for emp in employees:
         if not emp.pair_required:
             continue

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -106,11 +107,48 @@ class UpdaterTests(unittest.TestCase):
             self.assertTrue(database.exists())
             script_text = script.read_text(encoding="utf-8-sig")
             self.assertNotIn(str(database), script_text)
+            self.assertIn("Where-Object { $_.Name -like '_PYI_*' }", script_text)
             self.assertIn("$env:PYINSTALLER_RESET_ENVIRONMENT = '1'", script_text)
+            self.assertIn("SetDllDirectory($null)", script_text)
             self.assertLess(
                 script_text.index("PYINSTALLER_RESET_ENVIRONMENT"),
                 script_text.index("Start-Process -FilePath $targetExe"),
             )
+
+    def test_update_subprocess_environment_discards_pyinstaller_runtime_paths(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"_PYI_APPLICATION_HOME_DIR": "C:/missing-mei", "_PYI_ARCHIVE_FILE": "old.exe", "KEEP_ME": "yes"},
+            clear=True,
+        ):
+            environment = updater._clean_update_environment()
+        self.assertNotIn("_PYI_APPLICATION_HOME_DIR", environment)
+        self.assertNotIn("_PYI_ARCHIVE_FILE", environment)
+        self.assertEqual(environment["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertEqual(environment["KEEP_ME"], "yes")
+
+    def test_launch_self_update_resets_dll_path_before_starting_powershell(self) -> None:
+        script = Path("C:/Temp/gmp-update.ps1")
+        calls: list[str] = []
+        with patch.object(updater, "is_packaged_app", return_value=True), patch.object(
+            updater,
+            "update_install_error",
+            return_value="",
+        ), patch.object(updater, "_write_update_script", return_value=script), patch.object(
+            updater,
+            "_reset_windows_dll_search_path",
+            side_effect=lambda: calls.append("reset_dll"),
+        ) as reset_dll, patch.object(
+            updater.subprocess,
+            "Popen",
+            side_effect=lambda *args, **kwargs: calls.append("popen"),
+        ) as popen:
+            updater.launch_self_update(Path("C:/Temp/new.exe"))
+        reset_dll.assert_called_once_with()
+        self.assertEqual(calls, ["reset_dll", "popen"])
+        environment = popen.call_args.kwargs["env"]
+        self.assertEqual(environment["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertFalse(any(key.upper().startswith("_PYI_") for key in environment))
 
     def test_unwritable_install_folder_has_clear_message(self) -> None:
         with patch.object(updater, "is_packaged_app", return_value=True), patch.object(

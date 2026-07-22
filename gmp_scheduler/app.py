@@ -1150,6 +1150,7 @@ class MainWindow(QMainWindow):
                 )
         self.max_consecutive_spin = spin(self.rules.max_consecutive_work_days, 1)
         self.max_consecutive_gy_spin = spin(self.rules.max_consecutive_gy, 1)
+        self.min_weekly_work_spin = spin(self.rules.min_weekly_work_days, 0, 7)
 
     def active_rule_settings_source(self) -> str:
         if hasattr(self, "rule_source_combo"):
@@ -1181,6 +1182,7 @@ class MainWindow(QMainWindow):
         for widget, value in (
             (self.max_consecutive_spin, rules.max_consecutive_work_days),
             (self.max_consecutive_gy_spin, rules.max_consecutive_gy),
+            (self.min_weekly_work_spin, rules.min_weekly_work_days),
         ):
             widget.blockSignals(True)
             widget.setValue(value)
@@ -1744,7 +1746,7 @@ class MainWindow(QMainWindow):
             "자동생성 공정 배정 기준\n"
             "1. 날짜 유형별 최소 인원표에 맞춰 Day, SW, GY/당직을 먼저 채웁니다.\n"
             "2. 근무불가일, Day만 가능, 연속근무/연속 GY 제한에 걸리는 사람은 뒤로 밀리거나 제외됩니다.\n"
-            "3. 해당 주 근무가 2회 미만인 사람을 강하게 우선하고, 이미 근무가 많거나 같은 근무가 많은 사람은 뒤로 보냅니다.\n"
+            "3. 설정한 주간 최소 근무보다 적은 사람을 강하게 우선하고, 이미 근무가 많거나 같은 근무가 많은 사람은 뒤로 보냅니다.\n"
             "4. 주말/공휴일과 긴 연휴 중간 근무가 한 사람에게 몰리지 않도록 이전 배정 횟수를 점수에 반영합니다.\n"
             "5. GY/당직은 다음 휴무가 같은 모듈 인원끼리 겹치지 않도록 벌점을 줍니다.\n"
             "6. 모듈 가중치는 선택한 근무 유형에서 해당 모듈 인원이 조금 더 뽑히도록 점수를 보정합니다.\n"
@@ -1760,8 +1762,9 @@ class MainWindow(QMainWindow):
 
         rule_group = QGroupBox("제약")
         rule_form = QFormLayout(rule_group)
-        rule_form.addRow("최대 연속 근무", self.max_consecutive_spin)
+        rule_form.addRow("최대 연속 Day/SW", self.max_consecutive_spin)
         rule_form.addRow("최대 연속 GY", self.max_consecutive_gy_spin)
+        rule_form.addRow("주간 최소 근무", self.min_weekly_work_spin)
 
         module_group = QGroupBox("모듈")
         module_layout = QVBoxLayout(module_group)
@@ -1833,6 +1836,7 @@ class MainWindow(QMainWindow):
             widget.valueChanged.connect(lambda _value: self.mark_settings_dirty())
         self.max_consecutive_spin.valueChanged.connect(lambda _value: self.mark_settings_dirty())
         self.max_consecutive_gy_spin.valueChanged.connect(lambda _value: self.mark_settings_dirty())
+        self.min_weekly_work_spin.valueChanged.connect(lambda _value: self.mark_settings_dirty())
         self.module_weight_percent_spin.valueChanged.connect(lambda _value: self.mark_settings_dirty())
         for checkbox in self.module_weight_checks.values():
             checkbox.stateChanged.connect(lambda _state: self.mark_settings_dirty())
@@ -1900,6 +1904,7 @@ class MainWindow(QMainWindow):
         }
         rules.max_consecutive_work_days = self.max_consecutive_spin.value()
         rules.max_consecutive_gy = self.max_consecutive_gy_spin.value()
+        rules.min_weekly_work_days = self.min_weekly_work_spin.value()
         self.sync_module_weight_widgets(save=False)
         if update_source == self.rule_settings_source:
             self.rules = rules
@@ -2248,7 +2253,7 @@ class MainWindow(QMainWindow):
             f"{weight_text}"
             f"{pair_text}"
             f"{fixed_text}"
-            f"- 최대 연속 근무: {rules.max_consecutive_work_days}일\n"
+            f"- 최대 연속 Day/SW: {rules.max_consecutive_work_days}일\n"
             f"- 최대 연속 G/당직: {rules.max_consecutive_gy}일\n"
             "- 직원별 불가일은 근무 배정에서 제외합니다.\n"
             f"- 주 {rules.min_weekly_work_days}회 미만 배정 직원을 우선합니다.\n"
@@ -4334,9 +4339,6 @@ class MainWindow(QMainWindow):
         }
         count_color_values: List[float] = []
         for employee_key in sorted_keys:
-            total = totals[employee_key]
-            if total > 0:
-                count_color_values.append(float(total))
             present_months = month_presence.get(employee_key, set())
             for month_key in month_keys:
                 if month_key not in present_months:
@@ -4372,8 +4374,7 @@ class MainWindow(QMainWindow):
             total = totals[employee_key]
             total_item = SortableTableWidgetItem(str(total), total)
             total_item.setTextAlignment(Qt.AlignCenter)
-            if total > 0:
-                total_item.setBackground(self._relative_gradient_color(float(total), count_color_values))
+            total_item.setBackground(QColor("#ffffff"))
             table.setItem(row_index, 1, total_item)
 
             eligible_count = len(eligible_dates.get(employee_key, set()))
