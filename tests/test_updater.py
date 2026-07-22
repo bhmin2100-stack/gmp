@@ -104,7 +104,13 @@ class UpdaterTests(unittest.TestCase):
             database.write_bytes(b"database")
             script = updater._write_update_script(root / "GMP-Scheduler.exe", root / "new.exe", 42)
             self.assertTrue(database.exists())
-            self.assertNotIn(str(database), script.read_text(encoding="utf-8-sig"))
+            script_text = script.read_text(encoding="utf-8-sig")
+            self.assertNotIn(str(database), script_text)
+            self.assertIn("$env:PYINSTALLER_RESET_ENVIRONMENT = '1'", script_text)
+            self.assertLess(
+                script_text.index("PYINSTALLER_RESET_ENVIRONMENT"),
+                script_text.index("Start-Process -FilePath $targetExe"),
+            )
 
     def test_unwritable_install_folder_has_clear_message(self) -> None:
         with patch.object(updater, "is_packaged_app", return_value=True), patch.object(

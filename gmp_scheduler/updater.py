@@ -390,6 +390,7 @@ try {{
     if (Test-Path -LiteralPath $backupExe) {{ Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue }}
     if (Test-Path -LiteralPath $targetExe) {{ Move-WithRetry $targetExe $backupExe }}
     try {{ Move-WithRetry $newExe $targetExe }} catch {{ if ((Test-Path -LiteralPath $backupExe) -and -not (Test-Path -LiteralPath $targetExe)) {{ Move-Item -LiteralPath $backupExe -Destination $targetExe -Force }}; throw }}
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
     Start-Process -FilePath $targetExe -WorkingDirectory (Split-Path -Parent $targetExe)
     Start-Sleep -Seconds 2
     if (Test-Path -LiteralPath $backupExe) {{ Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue }}
