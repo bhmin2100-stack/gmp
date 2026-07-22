@@ -6,7 +6,7 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-from gmp_scheduler import updater
+from gmp_scheduler import __version__, build_info, updater
 
 
 class UpdaterTests(unittest.TestCase):
@@ -50,6 +50,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertTrue(newer.is_available)
 
     def test_build_channel_is_embedded_not_read_from_environment(self) -> None:
+        self.assertEqual(build_info.APP_VERSION, __version__)
+        self.assertEqual(build_info.UPDATE_CHANNEL, "personal")
         with patch.object(updater, "UPDATE_CHANNEL", "company"):
             self.assertEqual(updater.selected_channel(), updater.COMPANY_CHANNEL)
         with patch.object(updater, "UPDATE_CHANNEL", "personal"):
@@ -61,6 +63,19 @@ class UpdaterTests(unittest.TestCase):
         self.assertLess(updater.compare_versions("1.0.0", "1.0.1"), 0)
         info = updater._update_info_from_release(self.company, self.release, {"version": "0.2.11"}, None)
         self.assertEqual(info.notes, "Release notes")
+
+    def test_update_prompt_displays_versions_and_notes(self) -> None:
+        info = updater._update_info_from_release(
+            self.company,
+            self.release,
+            {"version": "0.2.11", "notes": "공평 배정 개선"},
+            None,
+        )
+        prompt = updater.update_prompt_text(info)
+        self.assertIn(info.current_label, prompt)
+        self.assertIn(info.latest_label, prompt)
+        self.assertIn("변경 내용", prompt)
+        self.assertIn("공평 배정 개선", prompt)
 
     def test_sha256_mismatch_removes_download(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -90,6 +105,21 @@ class UpdaterTests(unittest.TestCase):
             script = updater._write_update_script(root / "GMP-Scheduler.exe", root / "new.exe", 42)
             self.assertTrue(database.exists())
             self.assertNotIn(str(database), script.read_text(encoding="utf-8-sig"))
+
+    def test_unwritable_install_folder_has_clear_message(self) -> None:
+        with patch.object(updater, "is_packaged_app", return_value=True), patch.object(
+            Path,
+            "open",
+            side_effect=PermissionError("denied"),
+        ):
+            message = updater.update_install_error(Path("C:/Program Files/GMP/GMP-Scheduler.exe"))
+        self.assertIn("쓸 권한", message)
+        self.assertIn("사용자 쓰기 가능 폴더", message)
+
+    def test_source_run_cannot_launch_exe_replacement(self) -> None:
+        with patch.object(updater, "is_packaged_app", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "소스 실행"):
+                updater.launch_self_update(Path("update.exe"))
 
 
 if __name__ == "__main__":

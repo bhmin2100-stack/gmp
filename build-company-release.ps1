@@ -5,8 +5,21 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSCommandPath
 Set-Location $root
 $python = if (Test-Path ".venv\\Scripts\\python.exe") { ".venv\\Scripts\\python.exe" } else { "python" }
-$null = & $python -c "import PyInstaller" 2>$null
-if ($LASTEXITCODE -ne 0) {
+function Test-PythonImport([string]$ImportCode) {
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "SilentlyContinue"
+        & $python -c $ImportCode 2>$null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+if (-not (Test-PythonImport "import PySide6, openpyxl, holidays")) {
+    & $python -m pip install -r requirements.txt
+    if ($LASTEXITCODE -ne 0) { throw "Application dependency installation failed." }
+}
+if (-not (Test-PythonImport "import PyInstaller")) {
     & $python -m pip install pyinstaller
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller installation failed." }
 }
@@ -38,9 +51,13 @@ UPDATE_CHANNEL = "company"
     $distPath = Join-Path $root "dist"
     $defaultExe = Join-Path $distPath "GMP-Scheduler.exe"
     if (Test-Path $defaultExe) {
-        $distPath = Join-Path $distPath $version
-        Remove-Item -Recurse -Force $distPath -ErrorAction SilentlyContinue
-        Write-Host "Existing EXE is in use. Building to: $distPath"
+        try {
+            Remove-Item -LiteralPath $defaultExe -Force -ErrorAction Stop
+        } catch {
+            $distPath = Join-Path $distPath $version
+            Remove-Item -Recurse -Force $distPath -ErrorAction SilentlyContinue
+            Write-Host "Existing EXE is in use. Building to: $distPath"
+        }
     }
     & $python -m PyInstaller --noconsole --onefile --name "GMP-Scheduler" --icon $iconPath --add-data $iconData --distpath $distPath --workpath build-company --specpath build-company main.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
