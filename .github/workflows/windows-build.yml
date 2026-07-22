@@ -62,7 +62,7 @@ jobs:
 
       - name: Build company EXE
         run: |
-          python -m PyInstaller --noconsole --onefile --name "GMP-Scheduler-company" --icon "assets\gmp-scheduler.ico" --add-data "assets\gmp-scheduler.png;assets" --workpath build-company-actions --specpath build-company-actions main.py
+          python -m PyInstaller --noconsole --onefile --name "GMP-Scheduler-company" --icon "assets\gmp-scheduler.ico" --add-data "assets\gmp-scheduler.png;assets" --workpath build-company-actions main.py
 
       - name: Write release metadata
         shell: pwsh
