@@ -9,6 +9,7 @@ venv/
 env/
 *.egg-info/
 build/
+build-company/
 dist/
 
 # App/build outputs

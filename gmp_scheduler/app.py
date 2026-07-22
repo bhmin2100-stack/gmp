@@ -8,8 +8,8 @@ from html import escape
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QDate, QEvent, QMimeData, QObject, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence, QPalette
+from PySide6.QtCore import QByteArray, QDate, QEvent, QMimeData, QObject, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -50,12 +50,15 @@ from .excel_io import export_schedule_to_excel, gray_cell_offsets_from_html_rows
 from .holiday_balance import holiday_run_positions
 from .models import DAY_TYPE_LABELS, DAY_TYPE_ORDER, OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .module_settings import load_modules, save_modules
+from .monthly_summary import MONTHLY_SUMMARY_COLUMNS, employee_monthly_summary, monthly_summary_group_header, monthly_summary_group_tooltip, monthly_summary_key_for_assignment
 from .rule_settings import load_team_rules, save_team_rules
 from .rule_utils import day_shift_key, min_rules_for_date, rule_value_for_display, set_rule_value_from_display
 from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
 from .stats_exclusions import exclude_person, excluded_people, include_person
+from .summary_layout_settings import load_summary_layout, merge_summary_groups, save_summary_layout, split_summary_group, summary_group_id
+from .app_resources import app_icon_path
 from . import updater
 from .validation import validate_schedule
 
@@ -80,6 +83,7 @@ OVERVIEW_START_YEAR = 2025
 NAME_COL_WIDTH = 96
 ID_COL_WIDTH = 54
 DAY_COL_WIDTH = 32
+SUMMARY_COL_WIDTH = 64
 COMPACT_ROW_HEIGHT = 18
 COMPACT_FONT_SIZE = 8
 HEADER_FONT_SIZE = 9
@@ -102,6 +106,8 @@ RULE_SETTING_OPTIONS = (
 )
 LEGACY_LABEL = "기존"
 LOCKED_SPLIT_COLOR = QColor("#f3f3f3")
+SUMMARY_HEADER_COLOR = QColor("#e4eaef")
+SUMMARY_DRAG_MIME = "application/x-gmp-roster-summary-group"
 TEAM_SPLIT_START_DATE = date(2026, 8, 1)
 
 
@@ -253,6 +259,77 @@ class PasteTableWidget(QTableWidget):
                 self.setItem(row, col, QTableWidgetItem(value.strip()))
 
 
+class RosterSummaryHeader(QHeaderView):
+    """Header that merges summary groups when one is dragged onto another."""
+
+    def __init__(self, owner: "MainWindow", parent: QTableWidget) -> None:
+        super().__init__(Qt.Horizontal, parent)
+        self.owner = owner
+        self._press_pos = None
+        self._source_group_id = ""
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+
+    def summary_group_id_at(self, pos) -> str:
+        logical_index = self.logicalIndexAt(pos)
+        if logical_index < 0:
+            return ""
+        value = self.model().headerData(logical_index, Qt.Horizontal, Qt.UserRole)
+        return str(value or "")
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.position().toPoint()
+            self._source_group_id = self.summary_group_id_at(self._press_pos)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if (
+            not self._source_group_id
+            or self._press_pos is None
+            or not (event.buttons() & Qt.LeftButton)
+            or (event.position().toPoint() - self._press_pos).manhattanLength() < QApplication.startDragDistance()
+        ):
+            super().mouseMoveEvent(event)
+            return
+        mime = QMimeData()
+        mime.setData(SUMMARY_DRAG_MIME, QByteArray(self._source_group_id.encode("utf-8")))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction)
+        self._press_pos = None
+        self._source_group_id = ""
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        self._press_pos = None
+        self._source_group_id = ""
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasFormat(SUMMARY_DRAG_MIME):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        source_group_id = bytes(event.mimeData().data(SUMMARY_DRAG_MIME)).decode("utf-8", errors="ignore")
+        target_group_id = self.summary_group_id_at(event.position().toPoint())
+        if source_group_id and target_group_id and source_group_id != target_group_id:
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        source_group_id = bytes(event.mimeData().data(SUMMARY_DRAG_MIME)).decode("utf-8", errors="ignore")
+        target_group_id = self.summary_group_id_at(event.position().toPoint())
+        if source_group_id and target_group_id and source_group_id != target_group_id:
+            self.owner.merge_roster_summary_groups(source_group_id, target_group_id)
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        event.ignore()
+
+
 class MonthRosterTable(PasteTableWidget):
     """A month table in the yearly view that accepts Ctrl+V directly."""
 
@@ -261,6 +338,7 @@ class MonthRosterTable(PasteTableWidget):
         self.owner = owner
         self.year = year
         self.month = month
+        self.setHorizontalHeader(RosterSummaryHeader(owner, self))
         self.setToolTip("이 월 표를 클릭한 뒤 Ctrl+V 하면 엑셀 근무표가 바로 붙여넣어집니다.")
         self.setFocusPolicy(Qt.StrongFocus)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -296,6 +374,7 @@ class CurrentMonthRosterTable(PasteTableWidget):
     def __init__(self, owner: "MainWindow", *args, **kwargs) -> None:
         super().__init__(*args, allow_expand=False, **kwargs)
         self.owner = owner
+        self.setHorizontalHeader(RosterSummaryHeader(owner, self))
         self.setToolTip("큰 표는 전체 붙여넣기, 근무 코드만 복사한 작은 범위는 선택 셀부터 붙여넣기 됩니다.")
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -355,6 +434,7 @@ class MainWindow(QMainWindow):
         self._cumulative_stats_dirty = True
         self._suppress_month_reload = False
         self._schedule_header_menu_connected = False
+        self.roster_summary_groups, self.hidden_roster_summary_keys = load_summary_layout()
         self.month_split_page_index = 0
         self._preserve_roster_page_on_load = False
         self._update_check_thread: Optional[QThread] = None
@@ -1182,6 +1262,28 @@ class MainWindow(QMainWindow):
         if not isinstance(result, ScheduleResult):
             return
         dates = month_dates(result.year, result.month)
+        summary_start = len(dates) + 2
+        if col >= summary_start:
+            summary_index = col - summary_start
+            groups = getattr(table, "roster_summary_groups", self.roster_summary_groups)
+            if summary_index < 0 or summary_index >= len(groups):
+                return
+            group = tuple(groups[summary_index])
+            group_id = summary_group_id(group)
+            label = monthly_summary_group_header(group).replace("\n", " ")
+            menu = QMenu(self)
+            menu.addAction(f"{label} 열 숨기기").triggered.connect(
+                lambda _checked=False, current_group=group: self.set_roster_summary_group_visible(current_group, False)
+            )
+            if len(group) > 1:
+                menu.addAction("합친 집계 열 다시 분리").triggered.connect(
+                    lambda _checked=False, current_group_id=group_id: self.split_roster_summary_group(current_group_id)
+                )
+            menu.addSeparator()
+            self.add_roster_summary_visibility_menu(menu)
+            menu.exec(table.horizontalHeader().mapToGlobal(pos))
+            return
+
         day_index = col - 2
         if day_index < 0 or day_index >= len(dates):
             return
@@ -1192,7 +1294,64 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("휴일로 설정").triggered.connect(lambda: self.apply_calendar_override(d, "add_holiday"))
         menu.addAction("휴일 제외").triggered.connect(lambda: self.apply_calendar_override(d, "remove_holiday"))
+        menu.addSeparator()
+        self.add_roster_summary_visibility_menu(menu)
         menu.exec(table.horizontalHeader().mapToGlobal(pos))
+
+    def add_roster_summary_visibility_menu(self, menu: QMenu) -> None:
+        visibility_menu = menu.addMenu("집계 열 표시")
+        for group in self.roster_summary_groups:
+            action = visibility_menu.addAction(monthly_summary_group_header(group).replace("\n", " "))
+            action.setCheckable(True)
+            action.setChecked(not all(key in self.hidden_roster_summary_keys for key in group))
+            action.toggled.connect(
+                lambda checked, current_group=group: self.set_roster_summary_group_visible(current_group, checked)
+            )
+
+    def set_roster_summary_group_visible(self, group: tuple[str, ...], visible: bool) -> None:
+        if visible:
+            self.hidden_roster_summary_keys.difference_update(group)
+        else:
+            self.hidden_roster_summary_keys.update(group)
+        self.save_roster_summary_layout()
+        self.refresh_roster_summary_tables()
+        label = monthly_summary_group_header(group).replace("\n", " ")
+        self.statusBar().showMessage(f"{label} 집계 열을 {'표시' if visible else '숨김'} 처리했습니다.", 3000)
+
+    def merge_roster_summary_groups(self, source_group_id: str, target_group_id: str) -> None:
+        updated = merge_summary_groups(self.roster_summary_groups, source_group_id, target_group_id)
+        if updated == self.roster_summary_groups:
+            return
+        merged_group = next(
+            (group for group in updated if source_group_id.split("|")[0] in group and target_group_id.split("|")[0] in group),
+            (),
+        )
+        self.roster_summary_groups = updated
+        self.hidden_roster_summary_keys.difference_update(merged_group)
+        self.save_roster_summary_layout()
+        self.refresh_roster_summary_tables()
+        self.statusBar().showMessage(
+            f"{monthly_summary_group_header(tuple(merged_group)).replace(chr(10), ' ')} 집계 열을 합쳤습니다.",
+            3000,
+        )
+
+    def split_roster_summary_group(self, group_id: str) -> None:
+        updated = split_summary_group(self.roster_summary_groups, group_id)
+        if updated == self.roster_summary_groups:
+            return
+        self.roster_summary_groups = updated
+        self.save_roster_summary_layout()
+        self.refresh_roster_summary_tables()
+        self.statusBar().showMessage("합친 집계 열을 다시 분리했습니다.", 3000)
+
+    def save_roster_summary_layout(self) -> None:
+        save_summary_layout(self.roster_summary_groups, self.hidden_roster_summary_keys)
+
+    def refresh_roster_summary_tables(self) -> None:
+        if self.result:
+            self.render_schedule_table()
+        if hasattr(self, "year_scroll_layout"):
+            self.render_year_overview()
 
     def check_updates_on_startup(self) -> None:
         self.start_update_check(manual=False)
@@ -1366,7 +1525,7 @@ class MainWindow(QMainWindow):
                 "업데이트",
                 "업데이트 다운로드에 실패했습니다.\n\n"
                 f"{error}\n\n"
-                f"수동 다운로드: {updater.RELEASE_PAGE_URL}",
+                f"수동 다운로드: {updater.selected_channel().release_page_url}",
             )
             return
         if not isinstance(path, Path):
@@ -2709,6 +2868,9 @@ class MainWindow(QMainWindow):
     def show_schedule_cell_menu(self, table: QTableWidget, result: Optional[ScheduleResult], pos) -> None:
         if not isinstance(result, ScheduleResult):
             return
+        clicked_index = table.indexAt(pos)
+        if clicked_index.isValid() and clicked_index.column() >= len(month_dates(result.year, result.month)) + 2:
+            return
         cells = self.schedule_context_cells(table, pos)
         rows = self.schedule_context_rows(table, pos)
         if not cells and not rows:
@@ -3150,6 +3312,7 @@ class MainWindow(QMainWindow):
                     target_source,
                 ),
                 initial_schedule=initial_schedule,
+                historical_summary_counts=self.historical_summary_counts_for_generation(year, month),
             )
         except ScheduleError as exc:
             QMessageBox.warning(self, "생성 실패", str(exc))
@@ -3202,18 +3365,59 @@ class MainWindow(QMainWindow):
         table.setColumnWidth(1, ID_COL_WIDTH)
         for col in range(2, date_count + 2):
             table.setColumnWidth(col, DAY_COL_WIDTH)
+        summary_groups = getattr(table, "roster_summary_groups", self.roster_summary_groups)
+        for offset, group in enumerate(summary_groups):
+            col = date_count + 2 + offset
+            label_width = len(monthly_summary_group_header(tuple(group)).split("\n")[-1]) * 8 + 20
+            table.setColumnWidth(col, max(SUMMARY_COL_WIDTH, min(220, label_width)))
         for row in range(table.rowCount()):
             table.setRowHeight(row, COMPACT_ROW_HEIGHT)
 
         table_width = table.frameWidth() * 2 + 2
         if table.verticalHeader().isVisible():
             table_width += table.verticalHeader().width()
-        table_width += sum(table.columnWidth(col) for col in range(table.columnCount()))
+        table_width += sum(
+            table.columnWidth(col)
+            for col in range(table.columnCount())
+            if not table.isColumnHidden(col)
+        )
 
         table_height = table.frameWidth() * 2 + 2 + ROSTER_HEADER_HEIGHT
         table_height += sum(table.rowHeight(row) for row in range(table.rowCount()))
 
         table.setFixedSize(table_width, table_height)
+
+    def populate_roster_summary_columns(self, table: QTableWidget, result: ScheduleResult) -> None:
+        dates = month_dates(result.year, result.month)
+        summary_start = len(dates) + 2
+        summaries = [employee_monthly_summary(result, employee) for employee in result.employees]
+        table.roster_date_count = len(dates)  # type: ignore[attr-defined]
+        table.roster_summary_groups = list(self.roster_summary_groups)  # type: ignore[attr-defined]
+
+        for offset, group in enumerate(self.roster_summary_groups):
+            col = summary_start + offset
+            header_item = table.horizontalHeaderItem(col)
+            if header_item:
+                header_item.setBackground(SUMMARY_HEADER_COLOR)
+                header_item.setData(Qt.UserRole, summary_group_id(group))
+                header_item.setToolTip(
+                    f"{monthly_summary_group_tooltip(group)}\n"
+                    "다른 집계 헤더 위로 드래그하면 합산됩니다. 우클릭하면 표시·숨김 및 분리가 가능합니다."
+                )
+                header_font = header_item.font()
+                header_font.setBold(True)
+                header_item.setFont(header_font)
+                header_item.setTextAlignment(Qt.AlignCenter)
+            values = [sum(summary.get(key, 0) for key in group) for summary in summaries]
+            color_values = [0.0, *[float(value) for value in values]]
+            for row, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if value > 0:
+                    item.setBackground(self._relative_gradient_color(float(value), color_values))
+                table.setItem(row, col, item)
+            table.setColumnHidden(col, all(key in self.hidden_roster_summary_keys for key in group))
 
     def configure_stats_table_layout(self, table: QTableWidget, *, month_matrix: bool = False) -> None:
         table.setSortingEnabled(False)
@@ -3245,10 +3449,20 @@ class MainWindow(QMainWindow):
     def _make_schedule_view_table(self, result: ScheduleResult) -> QTableWidget:
         dates = month_dates(result.year, result.month)
         row_count = max(1, len(result.employees))
-        table = MonthRosterTable(self, result.year, result.month, row_count, len(dates) + 2)
+        table = MonthRosterTable(
+            self,
+            result.year,
+            result.month,
+            row_count,
+            len(dates) + 2 + len(self.roster_summary_groups),
+        )
         table.result = result
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setHorizontalHeaderLabels(["성명", "사번"] + [str(d.day) for d in dates])
+        table.setHorizontalHeaderLabels(
+            ["성명", "사번"]
+            + [str(d.day) for d in dates]
+            + [monthly_summary_group_header(group) for group in self.roster_summary_groups]
+        )
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         table.horizontalHeader().customContextMenuRequested.connect(
@@ -3294,6 +3508,7 @@ class MainWindow(QMainWindow):
                     if self.is_locked_split_cell(result, d):
                         cell.setToolTip("2026-08 전 기존 근무표입니다.")
                     table.setItem(row, col, cell)
+        self.populate_roster_summary_columns(table, result)
         table.cellChanged.connect(lambda row, col, t=table: self.on_month_table_cell_changed(t, row, col))
         self.configure_roster_table_layout(table, len(dates), row_count, overview=True)
         return table
@@ -3456,8 +3671,12 @@ class MainWindow(QMainWindow):
         self.schedule_table.clear()
         self.schedule_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.schedule_table.setRowCount(len(self.result.employees))
-        self.schedule_table.setColumnCount(len(dates) + 2)
-        headers = ["성명", "사번"] + [f"{weekday_ko(d)}\n{d.day}" for d in dates]
+        self.schedule_table.setColumnCount(len(dates) + 2 + len(self.roster_summary_groups))
+        headers = (
+            ["성명", "사번"]
+            + [f"{weekday_ko(d)}\n{d.day}" for d in dates]
+            + [monthly_summary_group_header(group) for group in self.roster_summary_groups]
+        )
         self.schedule_table.setHorizontalHeaderLabels(headers)
         self.schedule_table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         if not self._schedule_header_menu_connected:
@@ -3493,6 +3712,7 @@ class MainWindow(QMainWindow):
                 if self.is_locked_split_cell(self.result, d):
                     item.setToolTip("2026-08 전 기존 근무표입니다.")
                 self.schedule_table.setItem(row, col, item)
+        self.populate_roster_summary_columns(self.schedule_table, self.result)
         self.schedule_table.verticalHeader().setVisible(False)
         self.configure_roster_table_layout(self.schedule_table, len(dates), len(self.result.employees), overview=False)
         self.schedule_table.freezeColumnCount if hasattr(self.schedule_table, "freezeColumnCount") else None
@@ -3718,6 +3938,34 @@ class MainWindow(QMainWindow):
                     continue
                 initial.setdefault(d, {})[emp_key] = shift
         return initial
+
+    def historical_summary_counts_for_generation(self, year: int, month: int) -> Dict[str, Dict[str, int]]:
+        if year == 2020 and month == 1:
+            return {}
+        previous_year = year if month > 1 else year - 1
+        previous_month = month - 1 if month > 1 else 12
+        rows = self.filter_period_rows_for_split(
+            period_assignment_rows(2020, 1, previous_year, previous_month)
+        )
+        employee_keys = {employee.key for employee in self.employees}
+        counts: Dict[str, Counter] = {key: Counter() for key in employee_keys}
+        holidays_by_year: Dict[int, set[date]] = {}
+        for row in rows:
+            employee_key = f"{row.get('name') or ''}|{row.get('employee_no') or ''}"
+            if employee_key not in employee_keys:
+                continue
+            work_date = date.fromisoformat(str(row.get("work_date")))
+            holidays = holidays_by_year.setdefault(work_date.year, korean_holidays(work_date.year))
+            summary_key = monthly_summary_key_for_assignment(
+                work_date,
+                str(row.get("shift_code") or OFF),
+                holidays,
+            )
+            if not summary_key:
+                continue
+            counts[employee_key][summary_key] += 1
+            counts[employee_key]["total"] += 1
+        return {employee_key: dict(values) for employee_key, values in counts.items()}
 
     def previous_month_last_duty_keys(self, year: int, month: int, source_name: Optional[str] = None) -> set[str]:
         prev_year = year if month > 1 else year - 1
@@ -4509,6 +4757,9 @@ class MainWindow(QMainWindow):
 def run() -> None:
     app = QApplication(sys.argv)
     apply_light_theme(app)
+    icon_path = app_icon_path()
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

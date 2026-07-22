@@ -3,11 +3,12 @@ from __future__ import annotations
 import random
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Mapping, Optional, Set, Tuple
 
 from .calendar_utils import is_duty_day, is_holiday_or_weekend, korean_holidays, month_dates
 from .holiday_balance import holiday_run_positions
 from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
+from .monthly_summary import MONTHLY_SUMMARY_COLUMNS, employee_monthly_summary, monthly_summary_key_for_assignment
 from .pairing import PAIR_CATEGORY_ORDER, pair_category, pair_coverage
 from .rule_utils import day_shift_key_for_date, min_rules_for_date
 from .schedule_utils import GY_BLOCK_DAYS, next_workday_after
@@ -18,7 +19,7 @@ class ScheduleError(RuntimeError):
     pass
 
 
-def generate_month_schedule(
+def _generate_month_schedule_once(
     employees: List[Employee],
     year: int,
     month: int,
@@ -26,6 +27,7 @@ def generate_month_schedule(
     seed: Optional[int] = None,
     previous_day_duty_employee_keys: Optional[Set[str]] = None,
     initial_schedule: Optional[ScheduleMap] = None,
+    historical_summary_counts: Optional[Mapping[str, Mapping[str, int]]] = None,
 ) -> ScheduleResult:
     if not employees:
         raise ScheduleError("직원이 없습니다.")
@@ -40,15 +42,13 @@ def generate_month_schedule(
     counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     projected_rest_by_module: Dict[tuple[str, date], int] = defaultdict(int)
     previous_day_duty_employee_keys = previous_day_duty_employee_keys or set()
+    historical_summary_counts = historical_summary_counts or {}
     week_dates: Dict[date, List[date]] = defaultdict(list)
     for d in dates:
         week_dates[d - timedelta(days=d.weekday())].append(d)
 
     def bucket(d: date, shift: str) -> str:
-        prefix = "holiday" if is_holiday_or_weekend(d, holidays) else "weekday"
-        if shift == SHIFT_DUTY:
-            return "holiday_GY"
-        return f"{prefix}_{shift}"
+        return monthly_summary_key_for_assignment(d, shift, holidays) or f"other_{shift}"
 
     def week_bucket(d: date) -> str:
         start = d - timedelta(days=d.weekday())
@@ -82,13 +82,13 @@ def generate_month_schedule(
         if not emp.is_new:
             return 0
         b = bucket(d, shift)
-        if b in ("weekday_D", "weekday_S"):
-            if counts[emp.key]["weekday_D"] + counts[emp.key]["weekday_S"] == 0:
+        if b in ("weekday_day", "weekday_swing"):
+            if counts[emp.key]["weekday_day"] + counts[emp.key]["weekday_swing"] == 0:
                 return -12
-        if b in ("holiday_D", "holiday_S"):
-            if counts[emp.key]["holiday_D"] + counts[emp.key]["holiday_S"] == 0:
+        if b in ("holiday_day", "holiday_swing"):
+            if counts[emp.key]["holiday_day"] + counts[emp.key]["holiday_swing"] == 0:
                 return -12
-        if b == "weekday_G/지근" and counts[emp.key][b] == 0:
+        if b == "gy" and counts[emp.key][b] == 0:
             return -14
         return 0
 
@@ -150,6 +150,19 @@ def generate_month_schedule(
         score += rng.random()
         return score, rng.random()
 
+    def fairness_rank(emp: Employee, d: date, shift: str) -> Tuple[int, int, int, int, float, float]:
+        summary_key = bucket(d, shift)
+        history = historical_summary_counts.get(emp.key, {})
+        score, tie_breaker = candidate_score(emp, d, shift)
+        return (
+            counts[emp.key][summary_key],
+            counts[emp.key]["total"],
+            int(history.get(summary_key, 0)),
+            int(history.get("total", 0)),
+            score,
+            tie_breaker,
+        )
+
     def mark_assignment(emp: Employee, d: date, shift: str) -> None:
         schedule[d][emp.key] = shift
         counts[emp.key][shift] += 1
@@ -186,7 +199,7 @@ def generate_month_schedule(
         ]
         if not candidates:
             return False
-        candidates.sort(key=lambda e: candidate_score(e, d, shift))
+        candidates.sort(key=lambda e: fairness_rank(e, d, shift))
         chosen = candidates[0]
         mark_assignment(chosen, d, shift)
         reserve_projected_rest(chosen, d, shift)
@@ -294,20 +307,28 @@ def generate_month_schedule(
         candidates = [e for e in employees if e.key not in blocked_keys and can_start_gy_block(e, d)]
         if not candidates:
             return False
-        candidates.sort(key=lambda e: sum(candidate_score(e, cur, SHIFT_GY)[0] for cur in gy_block_dates(d)) + rng.random())
+        block = gy_block_dates(d)
+        candidates.sort(
+            key=lambda e: (
+                counts[e.key]["gy"],
+                counts[e.key]["total"],
+                int(historical_summary_counts.get(e.key, {}).get("gy", 0)),
+                int(historical_summary_counts.get(e.key, {}).get("total", 0)),
+                sum(candidate_score(e, cur, SHIFT_GY)[0] for cur in block),
+                rng.random(),
+            )
+        )
         chosen = candidates[0]
-        for cur in gy_block_dates(d):
+        for cur in block:
             mark_assignment(chosen, cur, SHIFT_GY)
         reserve_projected_rest(chosen, d, SHIFT_GY)
         mark_projected_rest(chosen, d, SHIFT_GY)
         return True
 
+    # Reserve month-long GY/duty blocks first. D/S can then balance around the
+    # actual GY and projected-rest constraints instead of losing candidates late.
     for d in dates:
         min_rules = min_rules_for_date(rules, d, holidays)
-        day_swing_order = [shift for shift in (SHIFT_DAY, SHIFT_SWING) if shift in min_rules]
-        for shift in day_swing_order:
-            for _ in range(max(0, min_rules.get(shift, 0) - assigned_count(d, shift))):
-                assign_one(d, shift)
         gy_shift = SHIFT_DUTY if is_duty_day(d) else SHIFT_GY
         required_gy = min_rules.get(gy_shift, 1)
         if not is_duty_day(d):
@@ -316,6 +337,13 @@ def generate_month_schedule(
                     break
         for _ in range(max(0, required_gy - assigned_count(d, gy_shift))):
             assign_one(d, gy_shift)
+
+    for d in dates:
+        min_rules = min_rules_for_date(rules, d, holidays)
+        day_swing_order = [shift for shift in (SHIFT_DAY, SHIFT_SWING) if shift in min_rules]
+        for shift in day_swing_order:
+            for _ in range(max(0, min_rules.get(shift, 0) - assigned_count(d, shift))):
+                assign_one(d, shift)
 
     def shift_allowed_for_pair(emp: Employee, shift: str) -> bool:
         return not emp.day_only or shift == SHIFT_DAY
@@ -390,3 +418,168 @@ def generate_month_schedule(
     result = ScheduleResult(year=year, month=month, employees=employees, schedule=schedule, holidays=holidays)
     result.warnings = validate_schedule(employees, year, month, schedule, holidays, rules)
     return result
+
+
+def _employee_is_eligible_for_summary(employee: Employee, summary_key: str) -> bool:
+    if employee.pair_required:
+        return False
+    if summary_key in {"weekday_swing", "holiday_swing", "gy", "saturday_duty"} and employee.day_only:
+        return False
+    return True
+
+
+def _distribution_range(values: List[int]) -> int:
+    return max(values) - min(values) if values else 0
+
+
+def schedule_fairness_score(
+    result: ScheduleResult,
+    historical_summary_counts: Optional[Mapping[str, Mapping[str, int]]] = None,
+) -> Tuple[int, int, int, int, int, int, int]:
+    history = historical_summary_counts or {}
+    summaries = {
+        employee.key: employee_monthly_summary(result, employee)
+        for employee in result.employees
+    }
+    three_level_columns = 0
+    singleton_excess_spread = 0
+    monthly_range_total = 0
+    cumulative_range_total = 0
+    monthly_totals: List[int] = []
+    cumulative_totals: List[int] = []
+
+    for employee in result.employees:
+        if employee.pair_required:
+            continue
+        current_total = sum(summaries[employee.key].values())
+        monthly_totals.append(current_total)
+        cumulative_totals.append(current_total + int(history.get(employee.key, {}).get("total", 0)))
+
+    for column in MONTHLY_SUMMARY_COLUMNS:
+        eligible = [
+            employee
+            for employee in result.employees
+            if _employee_is_eligible_for_summary(employee, column.key)
+        ]
+        current_values = [summaries[employee.key][column.key] for employee in eligible]
+        cumulative_values = [
+            summaries[employee.key][column.key]
+            + int(history.get(employee.key, {}).get(column.key, 0))
+            for employee in eligible
+        ]
+        three_level_columns += max(0, len(set(current_values)) - 2)
+        spread = _distribution_range(current_values)
+        if column.key != "gy":
+            singleton_excess_spread += max(0, spread - 1)
+        monthly_range_total += spread
+        cumulative_range_total += _distribution_range(cumulative_values)
+
+    return (
+        three_level_columns,
+        singleton_excess_spread,
+        monthly_range_total,
+        _distribution_range(monthly_totals),
+        cumulative_range_total,
+        _distribution_range(cumulative_totals),
+        len(result.warnings),
+    )
+
+
+def _rebalance_single_day_summary_columns(result: ScheduleResult, rules: ShiftRules) -> None:
+    summary_shifts = {
+        "weekday_day": SHIFT_DAY,
+        "weekday_swing": SHIFT_SWING,
+        "holiday_day": SHIFT_DAY,
+        "holiday_swing": SHIFT_SWING,
+    }
+    warnings = set(result.warnings)
+    max_moves = len(result.employees) * len(summary_shifts)
+    for _ in range(max_moves):
+        summaries = {
+            employee.key: employee_monthly_summary(result, employee)
+            for employee in result.employees
+        }
+        moved = False
+        for summary_key, shift in summary_shifts.items():
+            eligible = [
+                employee
+                for employee in result.employees
+                if _employee_is_eligible_for_summary(employee, summary_key)
+            ]
+            if not eligible:
+                continue
+            low_candidates = sorted(eligible, key=lambda employee: summaries[employee.key][summary_key])
+            high_candidates = sorted(eligible, key=lambda employee: summaries[employee.key][summary_key], reverse=True)
+            for high in high_candidates:
+                for low in low_candidates:
+                    if summaries[high.key][summary_key] - summaries[low.key][summary_key] <= 1:
+                        break
+                    for work_date in month_dates(result.year, result.month):
+                        if monthly_summary_key_for_assignment(work_date, shift, result.holidays) != summary_key:
+                            continue
+                        if result.schedule.get(work_date, {}).get(high.key, OFF) != shift:
+                            continue
+                        if result.schedule.get(work_date, {}).get(low.key, OFF) != OFF:
+                            continue
+                        if work_date in low.unavailable_dates:
+                            continue
+                        result.schedule[work_date][high.key] = OFF
+                        result.schedule[work_date][low.key] = shift
+                        new_warnings = set(validate_schedule(
+                            result.employees,
+                            result.year,
+                            result.month,
+                            result.schedule,
+                            result.holidays,
+                            rules,
+                        ))
+                        if new_warnings - warnings:
+                            result.schedule[work_date][low.key] = OFF
+                            result.schedule[work_date][high.key] = shift
+                            continue
+                        warnings = new_warnings
+                        moved = True
+                        break
+                    if moved:
+                        break
+                if moved:
+                    break
+            if moved:
+                break
+        if not moved:
+            break
+    result.warnings = sorted(warnings)
+
+
+def generate_month_schedule(
+    employees: List[Employee],
+    year: int,
+    month: int,
+    rules: Optional[ShiftRules] = None,
+    seed: Optional[int] = None,
+    previous_day_duty_employee_keys: Optional[Set[str]] = None,
+    initial_schedule: Optional[ScheduleMap] = None,
+    historical_summary_counts: Optional[Mapping[str, Mapping[str, int]]] = None,
+    balance_attempts: int = 12,
+) -> ScheduleResult:
+    attempt_count = max(1, balance_attempts)
+    base_seed = seed if seed is not None else random.SystemRandom().randrange(0, 2**31)
+    effective_rules = rules or ShiftRules()
+    candidates: List[ScheduleResult] = []
+    for attempt in range(attempt_count):
+        candidate = _generate_month_schedule_once(
+            employees,
+            year,
+            month,
+            effective_rules,
+            base_seed + attempt,
+            previous_day_duty_employee_keys,
+            initial_schedule,
+            historical_summary_counts,
+        )
+        _rebalance_single_day_summary_columns(candidate, effective_rules)
+        candidates.append(candidate)
+    return min(
+        candidates,
+        key=lambda result: schedule_fairness_score(result, historical_summary_counts),
+    )

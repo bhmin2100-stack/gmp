@@ -46,7 +46,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --noconsole --onefile --name "GMP-Scheduler" main.py
+          pyinstaller --noconsole --onefile --name "GMP-Scheduler" --icon "assets\gmp-scheduler.ico" --add-data "assets\gmp-scheduler.png;assets" main.py
 
       - name: Write release metadata
         shell: pwsh

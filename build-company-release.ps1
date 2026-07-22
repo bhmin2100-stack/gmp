@@ -13,6 +13,8 @@ if ($LASTEXITCODE -ne 0) {
 $version = (& $python -c "import gmp_scheduler; print(gmp_scheduler.__version__)").Trim()
 if (-not $version) { throw "Could not read gmp_scheduler.__version__." }
 $buildInfo = Join-Path $root "gmp_scheduler\\build_info.py"
+$iconPath = Join-Path $root "assets\\gmp-scheduler.ico"
+$iconData = (Join-Path $root "assets\\gmp-scheduler.png") + ";assets"
 $originalBuildInfo = Get-Content -LiteralPath $buildInfo -Raw
 $buildDate = (Get-Date).ToUniversalTime().ToString("o")
 $commit = (git rev-parse HEAD).Trim()
@@ -29,11 +31,22 @@ UPDATE_CHANNEL = "company"
 "@ | Set-Content -LiteralPath $buildInfo -Encoding utf8
     $embeddedVersion = (& $python -c "from gmp_scheduler import __version__; from gmp_scheduler.build_info import APP_VERSION, UPDATE_CHANNEL; print(f'{__version__}|{APP_VERSION}|{UPDATE_CHANNEL}')").Trim()
     if ($embeddedVersion -ne "$version|$version|company") { throw "Build version validation failed: $embeddedVersion" }
-    if ($Clean) { Remove-Item -Recurse -Force build-company, dist -ErrorAction SilentlyContinue }
-    & $python -m PyInstaller --noconsole --onefile --name "GMP-Scheduler" --distpath dist --workpath build-company --specpath build-company main.py
+    if ($Clean) {
+        Remove-Item -Recurse -Force build-company -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+    }
+    $distPath = Join-Path $root "dist"
+    $defaultExe = Join-Path $distPath "GMP-Scheduler.exe"
+    if (Test-Path $defaultExe) {
+        $distPath = Join-Path $distPath $version
+        Remove-Item -Recurse -Force $distPath -ErrorAction SilentlyContinue
+        Write-Host "Existing EXE is in use. Building to: $distPath"
+    }
+    & $python -m PyInstaller --noconsole --onefile --name "GMP-Scheduler" --icon $iconPath --add-data $iconData --distpath $distPath --workpath build-company --specpath build-company main.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
-    if (-not (Test-Path "dist\\GMP-Scheduler.exe")) { throw "The built EXE was not found." }
-    Write-Host "Company EXE: $root\\dist\\GMP-Scheduler.exe"
+    $builtExe = Join-Path $distPath "GMP-Scheduler.exe"
+    if (-not (Test-Path $builtExe)) { throw "The built EXE was not found." }
+    Write-Host "Company EXE: $builtExe"
     Write-Host "Version: $version"
 } finally {
     $originalBuildInfo | Set-Content -LiteralPath $buildInfo -Encoding utf8
