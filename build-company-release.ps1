@@ -76,7 +76,7 @@ UPDATE_CHANNEL = "company"
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
     $builtExe = Join-Path $distPath "GMP-Scheduler.exe"
     if (-not (Test-Path $builtExe)) { throw "The built EXE was not found." }
-    $releaseNotesBody | Set-Content -LiteralPath (Join-Path $distPath "RELEASE-NOTES.txt") -Encoding utf8
+    $releaseNotes | Set-Content -LiteralPath (Join-Path $distPath "RELEASE-NOTES.txt") -Encoding utf8
     Write-Host "Company EXE: $builtExe"
     Write-Host "Version: $version"
     Write-Host "PyInstaller: $requiredPyInstallerVersion (legacy updater transition compatible)"

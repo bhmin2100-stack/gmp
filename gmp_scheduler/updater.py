@@ -123,7 +123,7 @@ def current_build_id() -> str:
 
 
 def update_prompt_text(info: UpdateInfo) -> str:
-    notes = info.notes.strip() or "변경 내용이 등록되지 않았습니다."
+    notes = cumulative_update_notes(info)
     return (
         "새 버전이 있습니다.\n\n"
         f"현재: {info.current_label}\n"
@@ -136,6 +136,32 @@ def update_prompt_text(info: UpdateInfo) -> str:
 
 def has_release_notes(info: UpdateInfo) -> bool:
     return bool(info.notes.strip())
+
+
+def cumulative_update_notes(info: UpdateInfo) -> str:
+    notes = info.notes.strip()
+    if not notes:
+        return "변경 내용이 등록되지 않았습니다."
+
+    matches = list(re.finditer(r"(?m)^\s*#{1,6}\s*v?(\d+(?:\.\d+)+)\s*$", notes))
+    if not matches:
+        return notes
+
+    same_version_update = compare_versions(info.latest_version, info.current_version) == 0
+    sections: list[str] = []
+    for index, match in enumerate(matches):
+        version = match.group(1)
+        after_current = compare_versions(version, info.current_version) > 0
+        is_same_version_release = same_version_update and compare_versions(version, info.latest_version) == 0
+        not_after_latest = compare_versions(version, info.latest_version) <= 0
+        if not (not_after_latest and (after_current or is_same_version_release)):
+            continue
+        body_start = match.end()
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(notes)
+        body = notes[body_start:body_end].strip()
+        if body:
+            sections.append(f"[{version}]\n{body}")
+    return "\n\n".join(sections) if sections else notes
 
 
 def compare_versions(left: str, right: str) -> int:

@@ -87,7 +87,7 @@ jobs:
             exe_asset = "GMP-Scheduler.exe"
             sha256 = $hash
             size = $size
-            notes = $releaseNotesBody
+            notes = $releaseNotes
           }
           $metadata | ConvertTo-Json | Set-Content -Path "dist\version.json" -Encoding UTF8
 
@@ -101,10 +101,10 @@ jobs:
             pyinstaller = "6.8.0"
             sha256 = (Get-FileHash $companyExe -Algorithm SHA256).Hash.ToLower()
             size = (Get-Item $companyExe).Length
-            notes = $releaseNotesBody
+            notes = $releaseNotes
           }
           $companyMetadata | ConvertTo-Json | Set-Content -Path "dist\company-build.json" -Encoding UTF8
-          $releaseNotesBody | Set-Content -Path "dist\RELEASE-NOTES.txt" -Encoding UTF8
+          $releaseNotes | Set-Content -Path "dist\RELEASE-NOTES.txt" -Encoding UTF8
 
       - name: Publish company build branch
         shell: pwsh

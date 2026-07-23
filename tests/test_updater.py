@@ -113,6 +113,48 @@ class UpdaterTests(unittest.TestCase):
         self.assertFalse(updater.has_release_notes(info))
         self.assertTrue(updater.has_release_notes(info.__class__(**{**info.__dict__, "notes": "필터 고정"})))
 
+    def test_update_prompt_accumulates_only_versions_after_current(self) -> None:
+        notes = (
+            "# 0.2.21\n\n- 누적 변경 내용\n\n"
+            "# 0.2.20\n\n- 필터 고정\n\n"
+            "# 0.2.19\n\n- 팀별 경고\n\n"
+            "# 0.2.18\n\n- 이미 설치됨"
+        )
+        info = updater.UpdateInfo(
+            "0.2.18",
+            "",
+            "",
+            "0.2.21",
+            "",
+            "",
+            "",
+            "",
+            "https://example/exe",
+            notes=notes,
+        )
+        prompt = updater.update_prompt_text(info)
+        self.assertIn("[0.2.21]", prompt)
+        self.assertIn("[0.2.20]", prompt)
+        self.assertIn("[0.2.19]", prompt)
+        self.assertNotIn("[0.2.18]", prompt)
+        self.assertNotIn("이미 설치됨", prompt)
+
+    def test_update_prompt_shows_only_latest_section_for_previous_version(self) -> None:
+        notes = "# 0.2.21\n\n- 최신 기능\n\n# 0.2.20\n\n- 적용된 기능"
+        info = updater.UpdateInfo(
+            "0.2.20",
+            "",
+            "",
+            "0.2.21",
+            "",
+            "",
+            "",
+            "",
+            "https://example/exe",
+            notes=notes,
+        )
+        self.assertEqual(updater.cumulative_update_notes(info), "[0.2.21]\n- 최신 기능")
+
     def test_sha256_mismatch_removes_download(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "update"
