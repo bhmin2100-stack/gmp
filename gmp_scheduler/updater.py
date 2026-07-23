@@ -123,14 +123,19 @@ def current_build_id() -> str:
 
 
 def update_prompt_text(info: UpdateInfo) -> str:
-    notes = f"\n\n변경 내용:\n{info.notes}" if info.notes else ""
+    notes = info.notes.strip() or "변경 내용이 등록되지 않았습니다."
     return (
         "새 버전이 있습니다.\n\n"
         f"현재: {info.current_label}\n"
-        f"최신: {info.latest_label}{notes}\n\n"
+        f"최신: {info.latest_label}\n\n"
+        f"변경 내용:\n{notes}\n\n"
         "업데이트하면 프로그램을 종료한 뒤 새 버전으로 다시 실행합니다.\n"
         "근무표 DB와 사용자 데이터는 변경하지 않습니다."
     )
+
+
+def has_release_notes(info: UpdateInfo) -> bool:
+    return bool(info.notes.strip())
 
 
 def compare_versions(left: str, right: str) -> int:

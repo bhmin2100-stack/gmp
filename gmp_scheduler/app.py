@@ -57,6 +57,7 @@ from .schedule_utils import expand_gy_blocks
 from .scheduler import ScheduleError, generate_month_schedule
 from .stats import STAT_HEADERS, averages, compute_stats
 from .stats_exclusions import exclude_person, excluded_people, include_person
+from .stats_filter_settings import load_monthly_stats_filter, save_monthly_stats_filter
 from .summary_layout_settings import load_summary_layout, merge_summary_groups, save_summary_layout, split_summary_group, summary_group_id
 from .app_resources import app_icon_path
 from . import updater
@@ -551,11 +552,7 @@ class MainWindow(QMainWindow):
             ("swing", "SW"),
             ("gy", "GY"),
         ]
-        self.monthly_stats_filters: set[tuple[str, str]] = {
-            (date_key, shift_key)
-            for date_key, _date_label in self.monthly_stats_date_types
-            for shift_key, _shift_label in self.monthly_stats_shift_types
-        }
+        self.monthly_stats_filter_pinned, self.monthly_stats_filters = load_monthly_stats_filter()
         self._monthly_stats_holiday_position_cache: Dict[int, Dict[date, str]] = {}
         self.cumulative_stats_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.cumulative_stats_table.customContextMenuRequested.connect(self.show_stats_table_menu)
@@ -1400,18 +1397,14 @@ class MainWindow(QMainWindow):
                 return
             if manual:
                 if updater.is_packaged_app():
-                    answer = QMessageBox.question(
+                    QMessageBox.warning(
                         self,
                         "업데이트 확인 실패",
                         "업데이트 버전 정보를 확인하지 못했습니다.\n\n"
                         f"{error}\n\n"
-                        "회사망에서 GitHub API나 version.json만 막히는 경우가 있습니다.\n"
-                        "그래도 최신 EXE 파일 직접 다운로드를 시도할까요?",
-                        QMessageBox.Ok | QMessageBox.Cancel,
-                        QMessageBox.Ok,
+                        "변경 내용을 확인할 수 없으므로 직접 업데이트를 진행하지 않습니다.\n"
+                        f"배포 페이지: {updater.selected_channel().release_page_url}",
                     )
-                    if answer == QMessageBox.Ok:
-                        self.start_update_download(updater.direct_download_update_info())
                 else:
                     QMessageBox.warning(self, "업데이트 확인", f"업데이트 확인에 실패했습니다.\n\n{error}")
             return
@@ -1429,6 +1422,15 @@ class MainWindow(QMainWindow):
                     "새 배포본이 있지만 현재는 개발용 Python 실행 상태라 EXE 교체를 실행하지 않습니다.\n"
                     "배포된 GMP-Scheduler.exe에서 자동 업데이트가 동작합니다.",
                 )
+            return
+
+        if not updater.has_release_notes(info):
+            QMessageBox.warning(
+                self,
+                "업데이트 변경 내용 누락",
+                "새 버전은 확인했지만 변경 내용이 등록되지 않았습니다.\n\n"
+                "변경 내용을 확인할 수 있을 때까지 자동 업데이트를 진행하지 않습니다.",
+            )
             return
 
         self.show_update_prompt(info)
@@ -4236,6 +4238,10 @@ class MainWindow(QMainWindow):
                 grid.addWidget(checkbox, row, col, alignment=Qt.AlignCenter)
         layout.addLayout(grid)
 
+        pin_check = QCheckBox("선택한 필터 고정")
+        pin_check.setChecked(bool(getattr(self, "monthly_stats_filter_pinned", False)))
+        layout.addWidget(pin_check)
+
         button_row = QHBoxLayout()
         select_all_btn = QPushButton("전체 선택")
         clear_btn = QPushButton("전체 해제")
@@ -4247,6 +4253,11 @@ class MainWindow(QMainWindow):
 
         def apply_filters() -> None:
             self.monthly_stats_filters = {key for key, checkbox in checks.items() if checkbox.isChecked()}
+            self.monthly_stats_filter_pinned = pin_check.isChecked()
+            save_monthly_stats_filter(
+                self.monthly_stats_filters,
+                self.monthly_stats_filter_pinned,
+            )
             dialog.accept()
             self.render_cumulative_stats()
 

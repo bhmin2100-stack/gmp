@@ -6,6 +6,7 @@ $root = Split-Path -Parent $PSCommandPath
 Set-Location $root
 $python = if (Test-Path ".venv-company-py312\\Scripts\\python.exe") { ".venv-company-py312\\Scripts\\python.exe" } else { "python" }
 $companyRequirements = Join-Path $root "requirements-company-build.txt"
+$releaseNotesPath = Join-Path $root "RELEASE_NOTES.md"
 $requiredPyInstallerVersion = "6.8.0"
 function Test-PythonImport([string]$ImportCode) {
     $previousPreference = $ErrorActionPreference
@@ -30,6 +31,13 @@ if (-not (Test-PythonImport $buildEnvironmentCheck)) {
 }
 $version = (& $python -c "import gmp_scheduler; print(gmp_scheduler.__version__)").Trim()
 if (-not $version) { throw "Could not read gmp_scheduler.__version__." }
+$releaseNotes = [System.IO.File]::ReadAllText($releaseNotesPath).Trim()
+$expectedNotesHeading = "# $version"
+if (-not $releaseNotes.StartsWith($expectedNotesHeading)) {
+    throw "RELEASE_NOTES.md must start with '$expectedNotesHeading'."
+}
+$releaseNotesBody = $releaseNotes.Substring($expectedNotesHeading.Length).Trim()
+if (-not $releaseNotesBody) { throw "RELEASE_NOTES.md must contain release notes." }
 $buildInfo = Join-Path $root "gmp_scheduler\\build_info.py"
 $iconPath = Join-Path $root "assets\\gmp-scheduler.ico"
 $iconData = (Join-Path $root "assets\\gmp-scheduler.png") + ";assets"
@@ -68,6 +76,7 @@ UPDATE_CHANNEL = "company"
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
     $builtExe = Join-Path $distPath "GMP-Scheduler.exe"
     if (-not (Test-Path $builtExe)) { throw "The built EXE was not found." }
+    $releaseNotesBody | Set-Content -LiteralPath (Join-Path $distPath "RELEASE-NOTES.txt") -Encoding utf8
     Write-Host "Company EXE: $builtExe"
     Write-Host "Version: $version"
     Write-Host "PyInstaller: $requiredPyInstallerVersion (legacy updater transition compatible)"

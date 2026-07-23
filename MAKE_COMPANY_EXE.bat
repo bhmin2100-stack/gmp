@@ -102,6 +102,7 @@ echo.
 echo ========================================
 echo SUCCESS
 echo %RESULT_EXE%
+if exist "%CD%\dist\RELEASE-NOTES.txt" echo Release notes: %CD%\dist\RELEASE-NOTES.txt
 echo ========================================
 echo.
 

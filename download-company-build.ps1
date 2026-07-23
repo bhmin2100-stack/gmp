@@ -140,6 +140,16 @@ try {
     $outputDirectory = Split-Path -Parent $OutputPath
     New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
     Move-Item -LiteralPath $tempExe -Destination $OutputPath -Force
+    $releaseNotesOutput = Join-Path $outputDirectory "RELEASE-NOTES.txt"
+    if ($metadata.notes) {
+        [System.IO.File]::WriteAllText(
+            $releaseNotesOutput,
+            ([string]$metadata.notes).Trim(),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+    } elseif (Test-Path $releaseNotesOutput) {
+        [System.IO.File]::Delete($releaseNotesOutput)
+    }
     Write-Host "Company EXE: $OutputPath"
     Write-Host "Version: $sourceVersion"
     Write-Host "Commit: $sourceCommit"

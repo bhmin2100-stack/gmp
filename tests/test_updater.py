@@ -65,6 +65,7 @@ class UpdaterTests(unittest.TestCase):
         batch = (root / "MAKE_COMPANY_EXE.bat").read_text(encoding="utf-8")
         downloader = (root / "download-company-build.ps1").read_text(encoding="utf-8-sig")
         workflow = (root / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+        release_notes = (root / "RELEASE_NOTES.md").read_text(encoding="utf-8")
         self.assertIn("pyinstaller==6.8.0", requirements.lower())
         self.assertIn('$requiredPyInstallerVersion = "6.8.0"', powershell)
         self.assertIn("PyInstaller.__version__ == '6.8.0'", batch)
@@ -79,6 +80,10 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("GMP-Scheduler-company.exe", workflow)
         self.assertIn("company-build.json", workflow)
         self.assertIn("HEAD:company-build", workflow)
+        self.assertTrue(release_notes.startswith(f"# {__version__}\n"))
+        self.assertIn("RELEASE_NOTES.md must start", workflow)
+        self.assertIn("RELEASE-NOTES.txt", powershell)
+        self.assertIn("RELEASE-NOTES.txt", batch)
 
     def test_version_comparison_and_notes_fallback(self) -> None:
         self.assertGreater(updater.compare_versions("1.10.0", "1.9.9"), 0)
@@ -99,6 +104,14 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn(info.latest_label, prompt)
         self.assertIn("변경 내용", prompt)
         self.assertIn("공평 배정 개선", prompt)
+
+    def test_update_prompt_always_has_notes_section_and_missing_notes_block_update(self) -> None:
+        info = updater.UpdateInfo("0.2.19", "", "", "0.2.20", "", "", "", "", "https://example/exe")
+        prompt = updater.update_prompt_text(info)
+        self.assertIn("변경 내용:", prompt)
+        self.assertIn("등록되지 않았습니다", prompt)
+        self.assertFalse(updater.has_release_notes(info))
+        self.assertTrue(updater.has_release_notes(info.__class__(**{**info.__dict__, "notes": "필터 고정"})))
 
     def test_sha256_mismatch_removes_download(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

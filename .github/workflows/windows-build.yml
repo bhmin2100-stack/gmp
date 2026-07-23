@@ -67,6 +67,15 @@ jobs:
       - name: Write release metadata
         shell: pwsh
         run: |
+          $releaseNotes = (Get-Content "RELEASE_NOTES.md" -Raw -Encoding UTF8).Trim()
+          $expectedHeading = "# $env:GMP_VERSION"
+          if (-not $releaseNotes.StartsWith($expectedHeading)) {
+            throw "RELEASE_NOTES.md must start with '$expectedHeading'."
+          }
+          $releaseNotesBody = $releaseNotes.Substring($expectedHeading.Length).Trim()
+          if (-not $releaseNotesBody) {
+            throw "RELEASE_NOTES.md must contain release notes."
+          }
           $exe = "dist\GMP-Scheduler.exe"
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
           $size = (Get-Item $exe).Length
@@ -78,6 +87,7 @@ jobs:
             exe_asset = "GMP-Scheduler.exe"
             sha256 = $hash
             size = $size
+            notes = $releaseNotesBody
           }
           $metadata | ConvertTo-Json | Set-Content -Path "dist\version.json" -Encoding UTF8
 
@@ -91,8 +101,10 @@ jobs:
             pyinstaller = "6.8.0"
             sha256 = (Get-FileHash $companyExe -Algorithm SHA256).Hash.ToLower()
             size = (Get-Item $companyExe).Length
+            notes = $releaseNotesBody
           }
           $companyMetadata | ConvertTo-Json | Set-Content -Path "dist\company-build.json" -Encoding UTF8
+          $releaseNotesBody | Set-Content -Path "dist\RELEASE-NOTES.txt" -Encoding UTF8
 
       - name: Publish company build branch
         shell: pwsh
@@ -103,11 +115,12 @@ jobs:
           New-Item -ItemType Directory -Path $publish -Force | Out-Null
           Copy-Item "dist\GMP-Scheduler-company.exe" $publish
           Copy-Item "dist\company-build.json" $publish
+          Copy-Item "dist\RELEASE-NOTES.txt" $publish
           Set-Location $publish
           git init -b company-build
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add GMP-Scheduler-company.exe company-build.json
+          git add GMP-Scheduler-company.exe company-build.json RELEASE-NOTES.txt
           git commit -m "Company build $env:GMP_VERSION from ${{ github.sha }}"
           git remote add origin "https://x-access-token:$env:GH_PUSH_TOKEN@github.com/${{ github.repository }}.git"
           git push --force origin HEAD:company-build
@@ -117,14 +130,13 @@ jobs:
         with:
           tag_name: windows-latest
           name: Windows EXE Latest
-          body: |
-            Windows executable build for GMP shift scheduler.
-            Download GMP-Scheduler.exe and run it directly on Windows.
+          body_path: dist/RELEASE-NOTES.txt
           files: |
             dist/GMP-Scheduler.exe
             dist/version.json
             dist/GMP-Scheduler-company.exe
             dist/company-build.json
+            dist/RELEASE-NOTES.txt
           prerelease: true
           make_latest: true
           overwrite_files: true

@@ -145,7 +145,9 @@ https://github.com/bhmin2100-stack/gmp/releases/tag/windows-latest
 
 회사 PC에서 GitHub Desktop으로 `main`을 Pull한 뒤 실행 중인 GMP를 종료하고
 `MAKE_COMPANY_EXE.bat`을 더블클릭합니다. 성공하면 탐색기에서 선택되는
-`dist\GMP-Scheduler.exe`를 Company Release Manager에 등록합니다.
+`dist\GMP-Scheduler.exe`를 Company Release Manager에 등록합니다. 같은 폴더의
+`RELEASE-NOTES.txt` 내용을 Company Release Manager의 변경 내용 입력란에 넣습니다.
+변경 내용이 비어 있는 회사 Release는 사용자 앱에서 자동 업데이트가 차단됩니다.
 
 회사 빌드는 구버전 자동 업데이터에서 새 EXE를 처음 재실행할 때도 임시 Python DLL
 경로를 재사용하지 않도록 PyInstaller 6.8.0을 사용합니다. Python 3.11/3.12가 있는
