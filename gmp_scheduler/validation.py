@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, timedelta
-from typing import Dict, List, Set
+from typing import Dict, List, Mapping, Sequence, Set
 
 from .calendar_utils import is_duty_day, month_dates
-from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ShiftRules
+from .models import OFF, SHIFT_DAY, SHIFT_DUTY, SHIFT_GY, SHIFT_GY_REST, SHIFT_SWING, Employee, ScheduleMap, ScheduleResult, ShiftRules
 from .pairing import PAIR_CATEGORY_LABELS, PAIR_CATEGORY_ORDER, pair_category, pair_coverage
 from .rule_utils import min_rules_for_date
 from .stats import compute_stats
@@ -139,3 +139,40 @@ def validate_schedule(
         if missing:
             warnings.append(f"페어 {emp.name} 미충족: {', '.join(missing)}")
     return warnings
+
+
+def validate_schedules_by_source(
+    results_by_source: Mapping[str, ScheduleResult],
+    rules_by_source: Mapping[str, ShiftRules],
+    source_order: Sequence[str],
+) -> Dict[str, List[str]]:
+    warnings_by_source: Dict[str, List[str]] = {}
+    for source_name in source_order:
+        result = results_by_source.get(source_name)
+        rules = rules_by_source.get(source_name)
+        if result is None or rules is None:
+            continue
+        warnings = validate_schedule(
+            result.employees,
+            result.year,
+            result.month,
+            result.schedule,
+            result.holidays,
+            rules,
+        )
+        result.warnings = warnings
+        warnings_by_source[source_name] = warnings
+    return warnings_by_source
+
+
+def format_warning_sections(
+    warnings_by_source: Mapping[str, List[str]],
+    source_order: Sequence[str],
+) -> str:
+    sections: List[str] = []
+    for source_name in source_order:
+        warnings = warnings_by_source.get(source_name, [])
+        lines = [f"[{source_name}]"]
+        lines.extend(warnings or ["검증 경고 없음"])
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)

@@ -60,7 +60,7 @@ from .stats_exclusions import exclude_person, excluded_people, include_person
 from .summary_layout_settings import load_summary_layout, merge_summary_groups, save_summary_layout, split_summary_group, summary_group_id
 from .app_resources import app_icon_path
 from . import updater
-from .validation import validate_schedule
+from .validation import format_warning_sections, validate_schedule, validate_schedules_by_source
 
 SHIFT_OPTIONS = ["", SHIFT_DAY, SHIFT_SWING, SHIFT_GY, SHIFT_DUTY, SHIFT_GY_REST]
 SHIFT_COLORS = {
@@ -425,6 +425,7 @@ class MainWindow(QMainWindow):
         self.team_rules = load_team_rules()
         self.rule_settings_source = RULE_COMBINED
         self.rules = self.team_rules[self.rule_settings_source]
+        self.validation_warnings_by_source: Dict[str, List[str]] = {}
         self.module_names = load_modules()
         self.admin_only_widgets: List[QWidget] = []
         self.admin_only_actions: List[QAction] = []
@@ -4058,15 +4059,33 @@ class MainWindow(QMainWindow):
         self.sync_rules_from_widgets()
         if not self.result:
             return
-        rules = self.current_result_rules(self.result)
-        self.result.warnings = validate_schedule(
-            self.result.employees,
-            self.result.year,
-            self.result.month,
-            self.result.schedule,
-            self.result.holidays,
-            rules,
-        )
+        if self.month_has_team_dates(self.result.year, self.result.month):
+            results_by_source: Dict[str, ScheduleResult] = {}
+            for source_name in TEAM_VIEWS:
+                result = self.result if self.storage_source_name(self.result) == source_name else self.load_schedule_for_view(
+                    self.result.year,
+                    self.result.month,
+                    source_name,
+                )
+                self.apply_previous_month_gy_carryover(result)
+                self.apply_split_legacy_prefix(result)
+                results_by_source[source_name] = result
+            self.validation_warnings_by_source = validate_schedules_by_source(
+                results_by_source,
+                self.team_rules,
+                TEAM_VIEWS,
+            )
+        else:
+            self.validation_warnings_by_source = {}
+            rules = self.current_result_rules(self.result)
+            self.result.warnings = validate_schedule(
+                self.result.employees,
+                self.result.year,
+                self.result.month,
+                self.result.schedule,
+                self.result.holidays,
+                rules,
+            )
         self.render_stats()
         self.render_warnings()
         self.refresh_schedule_header_styles()
@@ -4718,6 +4737,11 @@ class MainWindow(QMainWindow):
 
     def render_warnings(self) -> None:
         if not self.result:
+            return
+        if self.validation_warnings_by_source:
+            self.warning_box.setPlainText(
+                format_warning_sections(self.validation_warnings_by_source, TEAM_VIEWS)
+            )
             return
         if self.result.warnings:
             self.warning_box.setPlainText("\n".join(self.result.warnings))
